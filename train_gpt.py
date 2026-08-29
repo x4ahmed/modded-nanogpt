@@ -1,22 +1,41 @@
 import os
 import sys
 
-# Read the current file and the kernels file code ASAP, for logging
-with open(sys.argv[0], 'r') as f:
-    code = f.read()
-with open(os.path.join(os.path.dirname(sys.argv[0]), 'triton_kernels.py'), 'r') as f:
-    code += f"\n\n{'-'*40}\n# triton_kernels.py\n{'-'*40}\n\n"
-    code += f.read()
-with open(os.path.join(os.path.dirname(sys.argv[0]), 'dc_triton_kernels.py'), 'r') as f:
-    code += f"\n\n{'-'*40}\n# dc_triton_kernels.py\n{'-'*40}\n\n"
-    code += f.read()
+from portable_runtime import (
+    collect_git_metadata,
+    format_final_summary,
+    make_run_plan,
+    parse_runtime_config,
+    seed_everything,
+    validation_batch_size,
+    validation_sequence_length,
+)
+
+runtime_config = parse_runtime_config()
+PORTABLE = runtime_config.portable
+RTX_PREFLIGHT = os.environ.get("RTX_PREFLIGHT") == "1"
+
+# Read every executed project source file ASAP for reproducible logs.
+script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+source_files = [os.path.abspath(sys.argv[0]), "portable_runtime.py", "triton_kernels.py", "dc_triton_kernels.py"]
+if PORTABLE:
+    source_files.append("portable_attention.py")
+if RTX_PREFLIGHT:
+    source_files.extend(["portable_preflight.py", os.path.join("tests", "rtx_preflight.py")])
+code = ""
+for source_file in source_files:
+    source_path = source_file if os.path.isabs(source_file) else os.path.join(script_dir, source_file)
+    with open(source_path, "r") as f:
+        if code:
+            code += f"\n\n{'-'*40}\n# {os.path.basename(source_path)}\n{'-'*40}\n\n"
+        code += f.read()
 
 import copy
 import glob
 import math
+import random
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from itertools import accumulate, pairwise
 from pathlib import Path
@@ -39,10 +58,27 @@ import torch.nn.functional as F
 from kernels import get_kernel
 from torch import Tensor, nn
 
-from triton_kernels import XXT, XTX, ba_plus_cAA, FusedLinearReLUSquareFunction, FusedSoftcappedCrossEntropy, quantize_transpose_mlp_down_weights, reduce_mlp_activation_scales, transpose_add, transpose_copy
+from triton_kernels import (
+    CE_KERNEL_COMPUTE_CAPABILITY,
+    CE_KERNEL_DYNAMIC_SHARED_BYTES,
+    CE_KERNEL_STATIC_SHARED_BYTES_MIN,
+    CE_KERNEL_TOTAL_SHARED_BYTES_MIN,
+    XXT,
+    XTX,
+    ba_plus_cAA,
+    FusedLinearReLUSquareFunction,
+    FusedSoftcappedCrossEntropy,
+    quantize_transpose_mlp_down_weights,
+    reduce_mlp_activation_scales,
+    transpose_add,
+    transpose_copy,
+)
 from dc_triton_kernels import (
     dc_attention_postonly_nodd_correction_add_base_triton,
 )
+if PORTABLE:
+    from portable_attention import create_document_block_masks
+    from torch.nn.attention.flex_attention import flex_attention
 # Fused triton kernel: relu(x @ W1.T)^2 @ W2.T
 # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
 ReLUSqrdMLP = FusedLinearReLUSquareFunction.apply
@@ -62,6 +98,21 @@ torch.cuda.set_device(device)
 dist.init_process_group(backend="cuda:nccl,cpu:gloo", device_id=device)
 dist.barrier()
 master_process = (rank == 0) # this process will do logging, checkpointing etc.
+if RTX_PREFLIGHT and (
+    not PORTABLE
+    or world_size != 2
+    or grad_accum_steps != 4
+    or os.environ.get("_RTX_DEFER_CE_INIT") != "1"
+):
+    raise RuntimeError("RTX preflight requires PORTABLE=1 with exactly two torchrun ranks")
+if PORTABLE:
+    assert runtime_config.seed is not None
+    seed_everything(
+        runtime_config.seed,
+        random_module=random,
+        numpy_module=np,
+        torch_module=torch,
+    )
 
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
@@ -1059,6 +1110,7 @@ class AttnArgs:
     sa_lambdas: torch.Tensor
     seqlens: torch.Tensor
     bm_size: int
+    block_mask: object | None
     yarn: Yarn
     key_offset: bool
     attn_gate_w: torch.Tensor | None
@@ -1066,7 +1118,8 @@ class AttnArgs:
     xsa_alpha: torch.Tensor | None
     train_max_seq_len: torch.Tensor
 
-flash_attn_interface = get_kernel('kernels-community/flash-attn3', version=1).flash_attn_interface
+if not PORTABLE:
+    flash_attn_interface = get_kernel('kernels-community/flash-attn3', version=1).flash_attn_interface
 
 
 def dc_gate(
@@ -1135,10 +1188,29 @@ class CausalSelfAttention(nn.Module):
             seqlens = 2 * seqlens
             max_len = 2 * max_len
 
-        # use flash_attn over flex_attn @varunneal. flash_attn_varlen suggested by @YouJiacheng
-        y = flash_attn_interface.flash_attn_varlen_func(q[0], k[0], v[0], cu_seqlens_q=seqlens, cu_seqlens_k=seqlens,
-                                                        max_seqlen_q=max_len, max_seqlen_k=max_len,
-                                                        causal=True, softmax_scale=yarn.attn_scale, window_size=(bm_size, 0))
+        if PORTABLE:
+            assert attn_args.block_mask is not None
+            y = flex_attention(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                block_mask=attn_args.block_mask,
+                scale=yarn.attn_scale,
+            ).transpose(1, 2)[0].contiguous()
+        else:
+            # flash_attn_varlen suggested by @YouJiacheng
+            y = flash_attn_interface.flash_attn_varlen_func(
+                q[0],
+                k[0],
+                v[0],
+                cu_seqlens_q=seqlens,
+                cu_seqlens_k=seqlens,
+                max_seqlen_q=max_len,
+                max_seqlen_k=max_len,
+                causal=True,
+                softmax_scale=yarn.attn_scale,
+                window_size=(bm_size, 0),
+            )
         if dc_w is not None:
             dc_weights = dc_gate(x, dc_w, self.num_heads)
             y = dc_attention_postonly_nodd_correction_add_base_triton(
@@ -1494,6 +1566,35 @@ class GPT(nn.Module):
         bm_sizes = [ws_short, ws_short, ws_short, ws_long, ws_short, ws_short, None, ws_short, ws_short, ws_short, ws_long]
         assert len(bm_sizes) == self.num_layers
         key_offset = [b==ws_long for b in bm_sizes] # apply partial key offset to long windows
+        if PORTABLE:
+            normal_short_mask, normal_long_mask = create_document_block_masks(
+                seqlens,
+                input_seq.numel(),
+                (ws_short, ws_long),
+                paired=False,
+            )
+            (paired_short_mask,) = create_document_block_masks(
+                seqlens,
+                input_seq.numel(),
+                (ws_short,),
+                paired=True,
+            )
+            block_masks = [
+                paired_short_mask,
+                normal_short_mask,
+                paired_short_mask,
+                normal_long_mask,
+                normal_short_mask,
+                paired_short_mask,
+                None,
+                normal_short_mask,
+                normal_short_mask,
+                paired_short_mask,
+                normal_long_mask,
+            ]
+        else:
+            block_masks = [None] * self.num_layers
+        assert len(block_masks) == self.num_layers
 
         use_mlp_fp8 = self.training and not os.environ.get("DISABLE_FP8", False)
         if use_mlp_fp8:
@@ -1621,6 +1722,7 @@ class GPT(nn.Module):
                     sa_lambdas=sa_lambdas[i],
                     seqlens=seqlens,
                     bm_size=bm_sizes[i],
+                    block_mask=block_masks[i],
                     yarn=yarn,
                     key_offset=key_offset[i],
                     attn_gate_w=attn_gates[i] if i in self.attn_gate_layers else None,
@@ -1885,12 +1987,12 @@ class Hyperparameters:
     val_files: str = os.path.join(data_path, "data/fineweb10B/fineweb_val_*.bin") # input .bin to eval validation loss on
     val_tokens: int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     # batch sizes
-    val_batch_size: int = 4 * 64 * 1024 * 8
+    val_batch_size: int = validation_batch_size(PORTABLE)
     # schedule
     num_scheduled_iterations: int = 1270  # number of steps to complete lr and ws schedule
     num_extension_iterations: int = 15  # number of steps to continue training at final lr and ws
     # evaluation and logging
-    run_id: str = f"{uuid.uuid4()}"
+    run_id: str = runtime_config.run_id
     # Descriptive run_id for this iteration:
     #   - explicit sparse connectivity refactor (no generic loop)
     #   - (1 + m_r9) * x self-reference fuse on layer 9
@@ -1991,6 +2093,7 @@ TRAINING_STAGES = [
 # TODO - Confirm.
 training_schedule = TrainingSchedule(TRAINING_STAGES, args.num_scheduled_iterations, args.num_extension_iterations, cooldown_frac=0.60)
 #training_schedule = TrainingSchedule(TRAINING_STAGES, args.num_scheduled_iterations, args.num_extension_iterations, cooldown_frac=0.55)
+run_plan = make_run_plan(training_schedule.total_steps, runtime_config.max_steps)
 
 def get_muon_momentum(step: int, muon_warmup_steps=300, muon_cooldown_steps=50, momentum_min=0.85, momentum_max=0.95):
     # warmup phase: linearly increase momentum from min to max
@@ -2217,19 +2320,58 @@ def print0(s, console=False):
                 print(s)
             print(s, file=f)
 
+def preflight_report(s):
+    line = f"[rank {rank}] {s}"
+    print(line, flush=True)
+    if master_process:
+        with open(logfile, "a") as f:
+            print(line, file=f)
+
 # begin by printing this file (the Python code)
 print0(code)
 print0("="*100)
 # log information about the hardware/software environment this is running on
+git_metadata = collect_git_metadata(script_dir)
+print0(f"run_id={runtime_config.run_id}")
+print0(f"seed={runtime_config.seed if PORTABLE else 'native-randomness'}")
+print0(f"git_commit={git_metadata['git_commit']} git_dirty={git_metadata['git_dirty']}")
+print0(f"PORTABLE={int(PORTABLE)} world_size={world_size} grad_accum_steps={grad_accum_steps}")
+print0(
+    f"requested_max_steps={runtime_config.max_steps if runtime_config.max_steps is not None else 'full'} "
+    f"effective_optimizer_steps={run_plan.optimizer_steps} "
+    f"full_schedule_steps={run_plan.full_schedule_steps}"
+)
+print0(
+    f"val_batch_size={args.val_batch_size} "
+    f"val_sequence_length={validation_sequence_length(args.val_batch_size, world_size, grad_accum_steps)} "
+    f"val_tokens={args.val_tokens}"
+)
 print0(f"Running Python {sys.version}")
 print0(f"Running PyTorch {torch.version.__version__} compiled for CUDA {torch.version.cuda}")
 print0(f"Running Triton version {triton.__version__}")
+device_properties = torch.cuda.get_device_properties(device)
+device_smem_optin = getattr(
+    device_properties,
+    "shared_memory_per_block_optin",
+    device_properties.shared_memory_per_block,
+)
+print0(
+    f"ce_compute_target={CE_KERNEL_COMPUTE_CAPABILITY} "
+    f"ce_dynamic_shared_bytes={CE_KERNEL_DYNAMIC_SHARED_BYTES} "
+    f"ce_static_shared_bytes_min={CE_KERNEL_STATIC_SHARED_BYTES_MIN} "
+    f"ce_total_shared_bytes_min={CE_KERNEL_TOTAL_SHARED_BYTES_MIN} "
+    f"device_shared_memory_per_block_optin={device_smem_optin}"
+)
 
 def nvidia_smi():
     import subprocess  # avoid top level import
     return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
 print0(nvidia_smi())
 print0("="*100)
+
+if RTX_PREFLIGHT:
+    from portable_preflight import run_ce_preflight
+    run_ce_preflight(preflight_report)
 
 model: nn.Module = GPT(
     vocab_size=50257,
@@ -2265,6 +2407,9 @@ training_manager = TrainingManager(model)
 #            Warmup kernels            #
 ########################################
 print0("Compiling model and warming up kernels (~7 minutes on first execution)", console=True)
+if RTX_PREFLIGHT:
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(device)
 # Warmup the training kernels, then re-initialize the state so we aren't cheating
 initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizer=training_manager.get_state()) # save the initial state
@@ -2292,13 +2437,79 @@ for step in warmup_steps:
         del loss
     training_manager.step_optimizers(step)
     model.quantize_mlp_fp8(bootstrap_down=True)
-print0("Resetting Model", console=True)
-model.zero_grad(set_to_none=True)
-model.load_state_dict(initial_state["model"])
-training_manager.reset(initial_state["optimizer"])
-del val_loader, train_loader, initial_state
-model.quantize_mlp_fp8(bootstrap_down=True)
-model.train()
+
+if RTX_PREFLIGHT:
+    from portable_preflight import memory_gate_passes, memory_headroom_bytes
+
+    torch.cuda.synchronize()
+    preflight_report(
+        f"MODEL_WARMUP pass sampled_steps={warmup_steps} "
+        f"peak_allocated_bytes={torch.cuda.max_memory_allocated(device)} "
+        f"peak_reserved_bytes={torch.cuda.max_memory_reserved(device)}"
+    )
+    del val_loader, train_loader, initial_state
+    del inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu
+    gc.collect()
+
+    # Step 1271 is the largest extension-stage batch/window and is odd, so the
+    # measured update exercises all four accumulation microbatches and both optimizers.
+    preflight_step = 1271
+    training_manager.advance_schedule(preflight_step)
+    train_loader = distributed_data_generator(
+        args.train_files,
+        TRAINING_STAGES[-1].batch_size,
+        TRAINING_STAGES[-1].train_max_seq_len,
+        grad_accum_steps=grad_accum_steps,
+    )
+    model.train()
+    model.zero_grad(set_to_none=True)
+    torch.cuda.synchronize()
+    for _ in range(grad_accum_steps):
+        inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(
+            training_manager.train_loader_send_args
+        )
+        training_manager.sparse_index_update(preflight_step, bigram_cpu)
+        loss = model(
+            inputs,
+            targets,
+            cum_seqlens,
+            bigram_inputs,
+            training_manager.get_forward_args(),
+        ).sum() * grad_scale
+        training_manager.sparse_index_share(preflight_step)
+        loss.backward()
+        del loss
+    training_manager.step_optimizers(preflight_step)
+    model.quantize_mlp_fp8(bootstrap_down=False)
+    torch.cuda.synchronize()
+
+    free_memory, total_memory = torch.cuda.mem_get_info(device)
+    peak_allocated = torch.cuda.max_memory_allocated(device)
+    peak_reserved = torch.cuda.max_memory_reserved(device)
+    min_headroom_gib = float(os.environ["RTX_MIN_HEADROOM_GIB"])
+    headroom = memory_headroom_bytes(total_memory, peak_reserved)
+    local_pass = memory_gate_passes(total_memory, peak_reserved, min_headroom_gib)
+    preflight_report(
+        "MEMORY_COMPILE_WARMUP_UPDATE "
+        f"step={preflight_step} total_bytes={total_memory} free_bytes={free_memory} "
+        f"peak_allocated_bytes={peak_allocated} peak_reserved_bytes={peak_reserved} "
+        f"headroom_bytes={headroom} min_headroom_gib={min_headroom_gib:g} "
+        f"status={'pass' if local_pass else 'fail'}"
+    )
+    global_pass = torch.tensor(int(local_pass), device=device, dtype=torch.int32)
+    dist.all_reduce(global_pass, op=dist.ReduceOp.MIN)
+    passed = bool(global_pass.item())
+    preflight_report(f"PREFLIGHT_FINAL status={'pass' if passed else 'fail'}")
+    dist.destroy_process_group()
+    raise SystemExit(0 if passed else 1)
+else:
+    print0("Resetting Model", console=True)
+    model.zero_grad(set_to_none=True)
+    model.load_state_dict(initial_state["model"])
+    training_manager.reset(initial_state["optimizer"])
+    del val_loader, train_loader, initial_state
+    model.quantize_mlp_fp8(bootstrap_down=True)
+    model.train()
 
 ########################################
 #        Training and validation       #
@@ -2315,14 +2526,14 @@ t0 = time.perf_counter()
 # (get_encoding is cached in tiktoken's registry), so this pays only the table construction.
 # In-place copy keeps the buffer's tensor identity, which the compiled graph holds.
 model.prefix_table.copy_(build_prefix_table(model.vocab_size))
-# begin training
-train_steps = training_schedule.total_steps
-for step in range(train_steps + 1):
-    last_step = (step == train_steps)
+# begin training. A short run truncates updates only; the full schedule is unchanged.
+train_steps = run_plan.optimizer_steps
+final_val_loss = None
+for step, last_step in run_plan.iterations():
     training_manager.advance_schedule(step)
     # --------------- VALIDATION SECTION -----------------
     if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
-        if last_step:
+        if last_step and run_plan.complete_schedule:
             training_manager.apply_final_ws_ext()
         # stop the clock
         torch.cuda.synchronize()
@@ -2339,7 +2550,9 @@ for step in range(train_steps + 1):
         val_loss /= val_steps
         del val_loader
         dist.reduce(val_loss, 0, op=dist.ReduceOp.AVG)
-        print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
+        if last_step and master_process:
+            final_val_loss = val_loss.item()
+        print0(f"step:{step}/{train_steps} val_loss:{val_loss:.6f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
         model.train()
         # start the clock again
         torch.cuda.synchronize()
@@ -2377,6 +2590,20 @@ if args.run_evals:
                        get_bigram_hash=get_bigram_hash, 
                        print0=print0)
 
-print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
-       f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+torch.cuda.synchronize()
+peak_allocated = torch.cuda.max_memory_allocated()
+peak_reserved = torch.cuda.max_memory_reserved()
+print0(f"peak memory allocated: {peak_allocated // 1024 // 1024} MiB "
+       f"reserved: {peak_reserved // 1024 // 1024} MiB", console=True)
+if master_process:
+    assert final_val_loss is not None
+    print0(
+        format_final_summary(
+            final_val_loss,
+            training_time_ms,
+            peak_allocated,
+            peak_reserved,
+        ),
+        console=True,
+    )
 dist.destroy_process_group()

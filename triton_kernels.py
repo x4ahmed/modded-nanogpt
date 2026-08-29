@@ -1,3 +1,5 @@
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -1170,14 +1172,37 @@ __global__ void ce_fwd_bwd_kernel(
 }
 """
 
-ce_fwd_bwd_kernel = torch.cuda._compile_kernel(
-    CE_KERNEL_DECLS + CE_KERNEL_SOURCE,
-    "ce_fwd_bwd_kernel",
-    compute_capability="90",
-    cuda_include_dirs=["/usr/local/cuda/include/"],
-    nvcc_options=["-lineinfo", "--use_fast_math"],
-)
-ce_fwd_bwd_kernel.set_shared_memory_config(CE_KERNEL_VOCAB_SIZE * 2)
+CE_KERNEL_COMPUTE_CAPABILITY = "90"
+CE_KERNEL_DYNAMIC_SHARED_BYTES = CE_KERNEL_VOCAB_SIZE * 2
+# Two static float[8] arrays are declared in the kernel in addition to dynamic smem.
+CE_KERNEL_STATIC_SHARED_BYTES_MIN = 2 * 8 * 4
+CE_KERNEL_TOTAL_SHARED_BYTES_MIN = CE_KERNEL_DYNAMIC_SHARED_BYTES + CE_KERNEL_STATIC_SHARED_BYTES_MIN
+_ce_fwd_bwd_kernel = None
+
+
+def compile_ce_kernel():
+    global _ce_fwd_bwd_kernel
+    if _ce_fwd_bwd_kernel is None:
+        _ce_fwd_bwd_kernel = torch.cuda._compile_kernel(
+            CE_KERNEL_DECLS + CE_KERNEL_SOURCE,
+            "ce_fwd_bwd_kernel",
+            compute_capability=CE_KERNEL_COMPUTE_CAPABILITY,
+            cuda_include_dirs=["/usr/local/cuda/include/"],
+            nvcc_options=["-lineinfo", "--use_fast_math"],
+        )
+    return _ce_fwd_bwd_kernel
+
+
+def configure_ce_kernel():
+    kernel = compile_ce_kernel()
+    kernel.set_shared_memory_config(CE_KERNEL_DYNAMIC_SHARED_BYTES)
+    return kernel
+
+
+# Preserve the record path's eager initialization. The RTX preflight defers these
+# two operations so compilation and shared-memory opt-in are reported separately.
+if os.environ.get("_RTX_DEFER_CE_INIT") != "1":
+    configure_ce_kernel()
 
 @torch.library.custom_op("nanogpt::ce_fwd_bwd", mutates_args={"losses", "grad_input"})
 def ce_fwd_bwd(
@@ -1197,12 +1222,13 @@ def ce_fwd_bwd(
     grad_scale: float,
 ) -> None:
     grid = (n_rows, 1, 1)
-    ce_fwd_bwd_kernel(
+    ce_kernel = compile_ce_kernel()
+    ce_kernel(
         grid,
         (CE_KERNEL_BLOCK_SIZE, 1, 1),
         (logits, targets, mtp_weights, prefix_targets, prefix_weight, losses, grad_input,
          n_rows, n_predict, A, B, C, grad_s, grad_scale),
-        shared_mem=CE_KERNEL_VOCAB_SIZE * 2,
+        shared_mem=CE_KERNEL_DYNAMIC_SHARED_BYTES,
     )
 
 class FusedSoftcappedCrossEntropy(torch.autograd.Function):
