@@ -11,8 +11,30 @@ BLOCK_SIZE = 128
 
 
 def _dense_to_ordered(dense_mask: Tensor) -> tuple[Tensor, Tensor]:
+    """Selected columns first in ascending order, unselected after, without a sort.
+
+    This is exactly `argsort(dim=-1, descending=True, stable=True)` on a boolean mask,
+    computed with cumsum and scatter instead. Inductor lowers torch.argsort to a Triton
+    bitonic sort that stages values and indices in shared memory; at the PORTABLE eval
+    sequence length the mask is 512x512 and the kernel requested 180,248 B against
+    SM120's 101,376 B limit, failing with "No valid triton configs". Measured on an
+    RTX 5090, 2026-08-30. cumsum and scatter carry no such block-size pressure.
+    """
     num_blocks = dense_mask.sum(dim=-1, dtype=torch.int32)
-    indices = dense_mask.argsort(dim=-1, descending=True, stable=True).to(torch.int32)
+    selected = dense_mask.to(torch.int64)
+    # Rank among selected entries, and among unselected entries, both in column order.
+    selected_rank = selected.cumsum(dim=-1) - 1
+    unselected_rank = (1 - selected).cumsum(dim=-1) - 1
+    slot = torch.where(
+        dense_mask,
+        selected_rank,
+        num_blocks.to(torch.int64)[..., None] + unselected_rank,
+    )
+    columns = torch.arange(
+        dense_mask.shape[-1], device=dense_mask.device, dtype=torch.int32
+    ).expand_as(dense_mask)
+    indices = torch.empty_like(columns)
+    indices.scatter_(-1, slot, columns)
     return num_blocks[None, None].contiguous(), indices[None, None].contiguous()
 
 

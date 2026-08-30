@@ -10,6 +10,8 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from gpu import require_triton, requires_cuda
 
+ROOT = Path(__file__).resolve().parents[1]
+
 try:
     import torch
 except ImportError:  # CPU-only development environments may not install project deps.
@@ -67,6 +69,28 @@ class BlockMaskSemanticsTests(unittest.TestCase):
         self.assertTrue(allowed(159, 0))
         self.assertFalse(allowed(160, 159))
         self.assertTrue(allowed(160, 160))
+
+    def test_ordering_matches_stable_argsort_without_sorting(self):
+        from portable_attention import _dense_to_ordered
+
+        # _dense_to_ordered must stay bit-identical to the argsort it replaced.
+        # It cannot use argsort itself: inductor lowers that to a Triton bitonic
+        # sort whose shared-memory demand exceeds SM120's limit at eval length.
+        source = (ROOT / "portable_attention.py").read_text(encoding="utf-8")
+        self.assertNotIn("argsort", source.split('"""')[0] + source.split('"""')[-1])
+
+        torch.manual_seed(3)
+        for shape in ((4, 4), (17, 33), (512, 512)):
+            for density in (0.0, 0.05, 0.5, 0.95, 1.0):
+                with self.subTest(shape=shape, density=density):
+                    mask = torch.rand(shape) < density
+                    counts, indices = _dense_to_ordered(mask)
+                    expected_counts = mask.sum(dim=-1, dtype=torch.int32)[None, None]
+                    expected_indices = mask.argsort(
+                        dim=-1, descending=True, stable=True
+                    ).to(torch.int32)[None, None]
+                    self.assertTrue(torch.equal(counts, expected_counts))
+                    self.assertTrue(torch.equal(indices, expected_indices))
 
     def test_partial_and_full_block_tables_match_exhaustive_oracle(self):
         block_size, length = 128, 512
