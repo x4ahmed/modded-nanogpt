@@ -341,6 +341,18 @@ class CeSharedMemoryContractTests(unittest.TestCase):
         self.assertNotIn("_H100_CLASS_SHARED_MEMORY", ast.unparse(TRITON_TREE))
         for banned in ("5090", "sm_120", "H100", "A100"):
             self.assertNotIn(banned, rendered)
+        # This runs inside the compiled region, so memoizing here is a dynamo graph
+        # break ("Mutating a variable not in the current scope"). Keep it pure.
+        subscript_assignments = [
+            ast.unparse(target)
+            for node in ast.walk(chooser)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Subscript)
+        ]
+        self.assertEqual(
+            subscript_assignments, [], "no memoization inside the traced path"
+        )
 
     def test_launch_caps_pipeline_depth_to_the_chosen_config(self):
         launcher = function_def(TRITON_TREE, "linear_relu_square")

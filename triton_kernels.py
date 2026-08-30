@@ -591,23 +591,21 @@ def _get_dummy_f32(device):
 # H100 tiles and the record path is untouched. A fixed cutoff would be wrong: an A100
 # offers exactly 163,840 B, which is under the 181 KB the original configuration needs
 # but over any "160 KiB means large" threshold.
-_MLP_BLOCK_CONFIG_CACHE: dict[tuple[int, bool], tuple[int, int, int, int]] = {}
-
-
 def _device_shared_memory_limit(device) -> int:
     props = torch.cuda.get_device_properties(device)
     return getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block)
 
 
 def _mlp_block_config(device, use_fp8: bool) -> tuple[int, int, int, int]:
-    """Return (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, max_num_stages)."""
-    index = torch.cuda.current_device() if device is None else torch.device(device).index
-    key = (index, use_fp8)
-    cached = _MLP_BLOCK_CONFIG_CACHE.get(key)
-    if cached is None:
-        cached = select_mlp_block_config(_device_shared_memory_limit(device), use_fp8)
-        _MLP_BLOCK_CONFIG_CACHE[key] = cached
-    return cached
+    """Return (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, max_num_stages).
+
+    Deliberately uncached. This runs inside the compiled region, where memoizing into
+    a module-level dict is a dynamo graph break: "HigherOrderOperator: Mutating a
+    variable not in the current scope (SideEffects)". What remains is a device-property
+    read plus integer arithmetic, which dynamo constant-folds -- the same pattern as the
+    NUM_SMS read further down, which has always lived on this path.
+    """
+    return select_mlp_block_config(_device_shared_memory_limit(device), use_fp8)
 
 
 def linear_relu_square(
