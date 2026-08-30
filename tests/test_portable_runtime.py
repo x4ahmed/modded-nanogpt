@@ -174,6 +174,10 @@ class PackingAndSeedTests(unittest.TestCase):
                 validation_sequence_length(NATIVE_VAL_BATCH_SIZE, world_size, accum),
                 262_144,
             )
+        with self.assertRaisesRegex(ValueError, r"world_size \* val_microbatches == 8"):
+            validation_sequence_length(PORTABLE_VAL_BATCH_SIZE, 1, 16)
+        with self.assertRaisesRegex(ValueError, "divide evenly"):
+            validation_sequence_length(10, 1, 8)
 
     def test_seed_calls_every_rng_once_with_no_rank_offset(self):
         calls = []

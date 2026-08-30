@@ -3,9 +3,45 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 
 
 GIB = 1024**3
+
+
+def _safe_stat(operation, default=-1):
+    try:
+        return int(operation())
+    except Exception:
+        return default
+
+
+@contextmanager
+def cuda_oom_guard(torch_module, report, device, stage, *, step=None, microbatch=None):
+    """Report a parseable preflight failure without attempting CUDA recovery."""
+    try:
+        yield
+    except torch_module.OutOfMemoryError:
+        cuda = torch_module.cuda
+        allocated = _safe_stat(lambda: cuda.memory_allocated(device))
+        reserved = _safe_stat(lambda: cuda.memory_reserved(device))
+        peak_allocated = _safe_stat(lambda: cuda.max_memory_allocated(device))
+        peak_reserved = _safe_stat(lambda: cuda.max_memory_reserved(device))
+        try:
+            free_memory, total_memory = map(int, cuda.mem_get_info(device))
+        except Exception:
+            free_memory, total_memory = -1, -1
+        process_bytes = total_memory - free_memory if min(free_memory, total_memory) >= 0 else -1
+        report(
+            "PREFLIGHT_OOM "
+            f"stage={stage} step={step if step is not None else 'na'} "
+            f"microbatch={microbatch if microbatch is not None else 'na'} "
+            f"allocated_bytes={allocated} reserved_bytes={reserved} "
+            f"peak_allocated_bytes={peak_allocated} peak_reserved_bytes={peak_reserved} "
+            f"free_bytes={free_memory} process_bytes={process_bytes} total_bytes={total_memory}"
+        )
+        report("PREFLIGHT_FINAL status=fail reason=cuda_oom")
+        raise
 
 
 def memory_headroom_bytes(total_memory: int, peak_reserved: int) -> int:

@@ -170,10 +170,13 @@ def validation_batch_size(portable: bool) -> int:
     return PORTABLE_VAL_BATCH_SIZE if portable else NATIVE_VAL_BATCH_SIZE
 
 
-def validation_sequence_length(val_batch_size: int, world_size: int, grad_accum_steps: int) -> int:
-    if world_size * grad_accum_steps != 8:
-        raise ValueError("validation packing expects world_size * grad_accum_steps == 8")
-    return val_batch_size // (world_size * grad_accum_steps)
+def validation_sequence_length(val_batch_size: int, world_size: int, val_microbatches: int) -> int:
+    packing_factor = world_size * val_microbatches
+    if packing_factor != 8:
+        raise ValueError("validation packing expects world_size * val_microbatches == 8")
+    if val_batch_size % packing_factor != 0:
+        raise ValueError("validation batch must divide evenly across ranks and microbatches")
+    return val_batch_size // packing_factor
 
 
 def seed_everything(seed: int, *, random_module, numpy_module, torch_module) -> None:

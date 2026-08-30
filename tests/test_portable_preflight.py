@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from portable_preflight import GIB, memory_gate_passes, memory_headroom_bytes
+from portable_preflight import GIB, cuda_oom_guard, memory_gate_passes, memory_headroom_bytes
 
 try:
     import torch
@@ -33,6 +33,87 @@ class MemoryGateTests(unittest.TestCase):
         for invalid in (-1.0, math.inf, -math.inf, math.nan):
             with self.assertRaises(ValueError):
                 memory_gate_passes(32 * GIB, 1, invalid)
+
+
+class CudaOomGuardTests(unittest.TestCase):
+    class FakeOom(RuntimeError):
+        pass
+
+    class FakeCuda:
+        def __init__(self):
+            self.calls = []
+
+        def _value(self, name, value):
+            self.calls.append(name)
+            return value
+
+        def memory_allocated(self, device):
+            return self._value("memory_allocated", 24)
+
+        def memory_reserved(self, device):
+            return self._value("memory_reserved", 25)
+
+        def max_memory_allocated(self, device):
+            return self._value("max_memory_allocated", 30)
+
+        def max_memory_reserved(self, device):
+            return self._value("max_memory_reserved", 31)
+
+        def mem_get_info(self, device):
+            return self._value("mem_get_info", (2, 32))
+
+        def synchronize(self):
+            raise AssertionError("OOM reporting must not synchronize")
+
+        def empty_cache(self):
+            raise AssertionError("OOM reporting must not modify allocator state")
+
+    def test_oom_is_reported_with_context_and_reraised(self):
+        cuda = self.FakeCuda()
+        fake_torch = type("FakeTorch", (), {"OutOfMemoryError": self.FakeOom, "cuda": cuda})
+        reports = []
+
+        with self.assertRaises(self.FakeOom):
+            with cuda_oom_guard(
+                fake_torch,
+                reports.append,
+                "cuda:0",
+                "warmup_training",
+                step=847,
+                microbatch=0,
+            ):
+                raise self.FakeOom("expected")
+
+        self.assertEqual(
+            reports,
+            [
+                "PREFLIGHT_OOM stage=warmup_training step=847 microbatch=0 "
+                "allocated_bytes=24 reserved_bytes=25 peak_allocated_bytes=30 "
+                "peak_reserved_bytes=31 free_bytes=2 process_bytes=30 total_bytes=32",
+                "PREFLIGHT_FINAL status=fail reason=cuda_oom",
+            ],
+        )
+        self.assertEqual(
+            cuda.calls,
+            [
+                "memory_allocated",
+                "memory_reserved",
+                "max_memory_allocated",
+                "max_memory_reserved",
+                "mem_get_info",
+            ],
+        )
+
+    def test_successful_stage_emits_nothing(self):
+        cuda = self.FakeCuda()
+        fake_torch = type("FakeTorch", (), {"OutOfMemoryError": self.FakeOom, "cuda": cuda})
+        reports = []
+
+        with cuda_oom_guard(fake_torch, reports.append, "cuda:0", "model_construction"):
+            pass
+
+        self.assertEqual(reports, [])
+        self.assertEqual(cuda.calls, [])
 
 
 class PreflightCliTypeTests(unittest.TestCase):

@@ -36,6 +36,7 @@ import math
 import random
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from itertools import accumulate, pairwise
 from pathlib import Path
@@ -90,8 +91,12 @@ dynamo.config.recompile_limit = 64
 rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 assert 8 % world_size == 0, "world_size must be a divisor of 8"
-grad_accum_steps = 8 // world_size
-grad_scale = 1 / grad_accum_steps # consistent grad magnitudes between different num_devices
+# Validation packing is part of the metric definition: world_size times the number
+# of validation microbatches must remain eight. One-GPU PORTABLE training uses twice
+# as many, smaller training microbatches so the largest fused-CE buffers fit in 32 GiB.
+val_grad_accum_steps = 8 // world_size
+train_grad_accum_steps = 16 if PORTABLE and world_size == 1 else val_grad_accum_steps
+train_grad_scale = 1 / train_grad_accum_steps
 assert torch.cuda.is_available()
 device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
 torch.cuda.set_device(device)
@@ -101,7 +106,8 @@ master_process = (rank == 0) # this process will do logging, checkpointing etc.
 if RTX_PREFLIGHT and (
     not PORTABLE
     or world_size not in (1, 2)
-    or grad_accum_steps != 8 // world_size
+    or val_grad_accum_steps != 8 // world_size
+    or train_grad_accum_steps != (16 if world_size == 1 else 8 // world_size)
     or os.environ.get("_RTX_DEFER_CE_INIT") != "1"
 ):
     raise RuntimeError("RTX preflight requires PORTABLE=1 with one or two torchrun ranks")
@@ -309,7 +315,7 @@ def polar_express(grad_chunk: torch.Tensor, momentum_buffer: torch.Tensor, momen
 # Sparse Comms for bigram embedding gradient reduce-scatter
 def _sparse_comms_active():
     # we count on this in order for sparse communication to be worthwhile
-    return world_size == 8 and grad_accum_steps == 1
+    return world_size == 8 and train_grad_accum_steps == 1
 
 @torch.no_grad
 def sparse_comms_start(idxes_np, N, rank, world, send_idxes_buffer):
@@ -1165,7 +1171,7 @@ class CausalSelfAttention(nn.Module):
         train_max_seq_len, yarn = attn_args.train_max_seq_len, attn_args.yarn
 
         q, k, v = F.linear(x, sa_lambdas[0] * qkvo_w[:self.dim * 3].type_as(x)).view(B, T, 3 * self.num_heads, self.head_dim).chunk(3, dim=-2)
-        max_len = train_max_seq_len if self.training else (args.val_batch_size // (grad_accum_steps * world_size))
+        max_len = train_max_seq_len if self.training else val_sequence_len
 
         q, k = norm(q), norm(k) # QK norm @Grad62304977
 
@@ -1306,7 +1312,7 @@ class GPT(nn.Module):
 
         # Transposed weight storage for faster gradient accumulation
         use_fp8 = not os.environ.get("DISABLE_FP8", False)
-        self.lm_head = CastedLinearT(model_dim, self.vocab_size, use_fp8=use_fp8, x_s=100/448, w_s=1.6/448, grad_s=grad_scale * 0.75/448)
+        self.lm_head = CastedLinearT(model_dim, self.vocab_size, use_fp8=use_fp8, x_s=100/448, w_s=1.6/448, grad_s=train_grad_scale * 0.75/448)
         nn.init.normal_(self.lm_head.weight, mean=0, std=0.005)
 
         self.embed = nn.Embedding(self.vocab_size, model_dim)
@@ -1791,7 +1797,7 @@ class GPT(nn.Module):
         # @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1). @classiclarryd updated to 23*sigmoid((logits+5)/7.5)
         if self.training:
             prefix_target_seq = self.prefix_table[target_seq]
-            loss_per_token = FusedSoftcappedCrossEntropy.apply(x.view(-1, x.size(-1)), target_seq, mtp_weights, prefix_target_seq, prefix_weight, self.lm_head.weight, self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s, grad_scale)
+            loss_per_token = FusedSoftcappedCrossEntropy.apply(x.view(-1, x.size(-1)), target_seq, mtp_weights, prefix_target_seq, prefix_weight, self.lm_head.weight, self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s, train_grad_scale)
         else:
             logits = self.lm_head(x)
             logits = 23 * torch.sigmoid((logits + 5) / 7.5)
@@ -1900,12 +1906,12 @@ def get_bigram_hash(x):
     out[1:] = torch.bitwise_xor(rand_int_1 * out[1:], rand_int_2 * out[:-1]) % mod
     return out
 
-def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_len: int, grad_accum_steps: int = 1, align_to_bos: bool = True):
+def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_len: int, microbatch_steps: int = 1, align_to_bos: bool = True):
     # align_to_bos: each sequence begins with Beginning of Sequence token, sequences truncated to max_seq_len
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
-    assert num_tokens % (world_size * grad_accum_steps) == 0, "Batch size must be divisible by world size"
-    num_tokens = num_tokens // grad_accum_steps
+    assert num_tokens % (world_size * microbatch_steps) == 0, "Batch size must be divisible by world size and microbatch count"
+    num_tokens = num_tokens // microbatch_steps
 
     files = [Path(file) for file in sorted(glob.glob(filename_pattern))]
     if not files:
@@ -1975,10 +1981,10 @@ def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_l
         )
 
         if new_params is not None:
-            # makes it possible for generator to receive new (num_tokens, max_seq_len, grad_accum_steps) via .send()
-            new_num_tokens, new_max_seq_len, new_grad_accum_steps = new_params
-            assert new_num_tokens % (world_size * new_grad_accum_steps) == 0, "Num tokens must be divisible by world size"
-            num_tokens = new_num_tokens // new_grad_accum_steps
+            # makes it possible for generator to receive new (num_tokens, max_seq_len, microbatch_steps) via .send()
+            new_num_tokens, new_max_seq_len, new_microbatch_steps = new_params
+            assert new_num_tokens % (world_size * new_microbatch_steps) == 0, "Num tokens must be divisible by world size and microbatch count"
+            num_tokens = new_num_tokens // new_microbatch_steps
             max_seq_len = new_max_seq_len
 
 # -----------------------------------------------------------------------------
@@ -2011,6 +2017,13 @@ class Hyperparameters:
     bigram_sign_table_rows: int = 8192  # prefer a power of 2 (values ~500-15000 gave similar results)
 
 args = Hyperparameters()
+val_sequence_len = validation_sequence_length(
+    args.val_batch_size,
+    world_size,
+    val_grad_accum_steps,
+)
+if PORTABLE:
+    assert val_sequence_len == 65_536, "RTX-local-v1 validation context must remain 65,536 tokens"
 
 @dataclass(slots=True)
 class TrainingStage:
@@ -2094,6 +2107,10 @@ TRAINING_STAGES = [
     TrainingStage(train_max_seq_len=2048, batch_size=24 * 2048 * 8, window_sizes=(6, 13), lr_mul=1.0,  # lr_mul is not used
                   mtp_weights_start=[1.0], mtp_weights_end=[1.0], prefix_weight_start=0.0, prefix_weight_end=0.0),
 ]
+assert all(
+    stage.batch_size % (world_size * train_grad_accum_steps) == 0
+    for stage in TRAINING_STAGES
+), "Every training-stage batch must divide evenly into the configured microbatches"
 
 # TODO - Confirm.
 training_schedule = TrainingSchedule(TRAINING_STAGES, args.num_scheduled_iterations, args.num_extension_iterations, cooldown_frac=0.60)
@@ -2226,7 +2243,7 @@ class TrainingManager():
         new_batch_size = stage.batch_size
         new_train_max_seq_len = stage.train_max_seq_len
         if new_batch_size != self.batch_size or new_train_max_seq_len != self.train_max_seq_len:
-            self.train_loader_send_args = (new_batch_size, new_train_max_seq_len, grad_accum_steps)
+            self.train_loader_send_args = (new_batch_size, new_train_max_seq_len, train_grad_accum_steps)
             self.batch_size = new_batch_size
             self.train_max_seq_len = new_train_max_seq_len
         else:
@@ -2337,6 +2354,21 @@ def preflight_report(s):
         with open(logfile, "a") as f:
             print(line, file=f)
 
+if RTX_PREFLIGHT:
+    from portable_preflight import cuda_oom_guard
+
+def preflight_cuda_stage(stage, *, step=None, microbatch=None):
+    if not RTX_PREFLIGHT:
+        return nullcontext()
+    return cuda_oom_guard(
+        torch,
+        preflight_report,
+        device,
+        stage,
+        step=step,
+        microbatch=microbatch,
+    )
+
 def cpu_state_copy(state):
     """Deep-copy state to host memory without first duplicating CUDA tensors.
 
@@ -2408,7 +2440,11 @@ print0(
     f"python_hash_seed={runtime_config.python_hash_seed or 'unset'}"
 )
 print0(f"git_commit={git_metadata['git_commit']} git_dirty={git_metadata['git_dirty']}")
-print0(f"PORTABLE={int(PORTABLE)} world_size={world_size} grad_accum_steps={grad_accum_steps}")
+print0(
+    f"PORTABLE={int(PORTABLE)} world_size={world_size} "
+    f"train_grad_accum_steps={train_grad_accum_steps} "
+    f"val_grad_accum_steps={val_grad_accum_steps}"
+)
 print0(
     f"requested_max_steps={runtime_config.max_steps if runtime_config.max_steps is not None else 'full'} "
     f"effective_optimizer_steps={run_plan.optimizer_steps} "
@@ -2416,7 +2452,7 @@ print0(
 )
 print0(
     f"val_batch_size={args.val_batch_size} "
-    f"val_sequence_length={validation_sequence_length(args.val_batch_size, world_size, grad_accum_steps)} "
+    f"val_sequence_length={val_sequence_len} "
     f"val_tokens={args.val_tokens}"
 )
 print0(f"Running Python {sys.version}")
@@ -2444,37 +2480,40 @@ print0("="*100)
 
 if RTX_PREFLIGHT:
     from portable_preflight import run_ce_preflight
-    run_ce_preflight(preflight_report)
+    with preflight_cuda_stage("ce_preflight"):
+        run_ce_preflight(preflight_report)
 
-model: nn.Module = GPT(
-    vocab_size=50257,
-    num_layers=11,
-    num_heads=6,
-    head_dim=128,
-    model_dim=768,
-    max_seq_len=args.val_batch_size // (grad_accum_steps * world_size)
-).cuda()
-for m in model.modules():
-    if isinstance(m, (nn.Embedding, nn.Linear)):
-        m.weight.data = m.weight.data.bfloat16()
-model.ve_gate_bank.data = model.ve_gate_bank.data.bfloat16()
-model.qk_bank.data = model.qk_bank.data.bfloat16()
-model.vo_bank.data = model.vo_bank.data.bfloat16()
-model.mlp_bank.data = model.mlp_bank.data.bfloat16()
-model.mudd_w1.data = model.mudd_w1.data.bfloat16()
-model.mudd_w2.data = model.mudd_w2.data.bfloat16()
-model.mudd_b2.data = model.mudd_b2.data.bfloat16()
-model.mudd_gate_w1.data = model.mudd_gate_w1.data.bfloat16()
-model.mudd_gate_w2.data = model.mudd_gate_w2.data.bfloat16()
-model.mudd_gate_b2.data = model.mudd_gate_b2.data.bfloat16()
-for param in model.parameters():
-    dist.broadcast(param.detach(), 0)
-dist.broadcast(model.bigram_sign_table, 0)  # buffer, not in parameters()
-model.quantize_mlp_fp8(bootstrap_down=True)
+with preflight_cuda_stage("model_construction"):
+    model: nn.Module = GPT(
+        vocab_size=50257,
+        num_layers=11,
+        num_heads=6,
+        head_dim=128,
+        model_dim=768,
+        max_seq_len=val_sequence_len
+    ).cuda()
+    for m in model.modules():
+        if isinstance(m, (nn.Embedding, nn.Linear)):
+            m.weight.data = m.weight.data.bfloat16()
+    model.ve_gate_bank.data = model.ve_gate_bank.data.bfloat16()
+    model.qk_bank.data = model.qk_bank.data.bfloat16()
+    model.vo_bank.data = model.vo_bank.data.bfloat16()
+    model.mlp_bank.data = model.mlp_bank.data.bfloat16()
+    model.mudd_w1.data = model.mudd_w1.data.bfloat16()
+    model.mudd_w2.data = model.mudd_w2.data.bfloat16()
+    model.mudd_b2.data = model.mudd_b2.data.bfloat16()
+    model.mudd_gate_w1.data = model.mudd_gate_w1.data.bfloat16()
+    model.mudd_gate_w2.data = model.mudd_gate_w2.data.bfloat16()
+    model.mudd_gate_b2.data = model.mudd_gate_b2.data.bfloat16()
+    for param in model.parameters():
+        dist.broadcast(param.detach(), 0)
+    dist.broadcast(model.bigram_sign_table, 0)  # buffer, not in parameters()
+    model.quantize_mlp_fp8(bootstrap_down=True)
 
 report_memory("after_model_construction")
-model: nn.Module = torch.compile(model, dynamic=False, fullgraph=True)
-training_manager = TrainingManager(model)
+with preflight_cuda_stage("optimizer_construction"):
+    model: nn.Module = torch.compile(model, dynamic=False, fullgraph=True)
+    training_manager = TrainingManager(model)
 report_memory("after_optimizer_construction")
 
 
@@ -2491,13 +2530,14 @@ if RTX_PREFLIGHT:
 # high-water mark. The native path keeps its original device-resident snapshot.
 # Both restore paths copy into the existing live buffers, and the backup is freed
 # before the clock starts, so this does not change model math or timed training.
-initial_state = dict(
-    model=cpu_state_copy(model.state_dict()) if PORTABLE else copy.deepcopy(model.state_dict()),
-    optimizer=training_manager.get_state(to_cpu=PORTABLE),
-)  # save the initial state
+with preflight_cuda_stage("warmup_backup"):
+    initial_state = dict(
+        model=cpu_state_copy(model.state_dict()) if PORTABLE else copy.deepcopy(model.state_dict()),
+        optimizer=training_manager.get_state(to_cpu=PORTABLE),
+    )  # save the initial state
 report_memory("after_warmup_backup")
-train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].batch_size, TRAINING_STAGES[0].train_max_seq_len, grad_accum_steps=grad_accum_steps)
-val_loader = distributed_data_generator(args.val_files, args.val_batch_size, -1, grad_accum_steps=grad_accum_steps, align_to_bos=False)
+train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].batch_size, TRAINING_STAGES[0].train_max_seq_len, microbatch_steps=train_grad_accum_steps)
+val_loader = distributed_data_generator(args.val_files, args.val_batch_size, -1, microbatch_steps=val_grad_accum_steps, align_to_bos=False)
 
 transition_steps = training_manager.get_transition_steps()
 # first and last pair of steps in each transition
@@ -2506,31 +2546,34 @@ print0(f"Sampling steps {warmup_steps} for warmup", console=True)
 for step in warmup_steps:
     training_manager.advance_schedule(step)
     model.eval()
-    with torch.no_grad():
+    with preflight_cuda_stage("warmup_validation", step=step, microbatch=0), torch.no_grad():
         inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
         model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
     if step == warmup_steps[0]:
         report_memory("after_first_validation_forward")
     model.train()
-    for idx in range(grad_accum_steps):
-        send_args = training_manager.train_loader_send_args
-        inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(send_args)
-        training_manager.sparse_index_update(step, bigram_cpu)
-        loss = model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).sum() * grad_scale
-        training_manager.sparse_index_share(step)
-        loss.backward()
-        del loss
+    for idx in range(train_grad_accum_steps):
+        with preflight_cuda_stage("warmup_training", step=step, microbatch=idx):
+            send_args = training_manager.train_loader_send_args
+            inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(send_args)
+            training_manager.sparse_index_update(step, bigram_cpu)
+            loss = model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).sum() * train_grad_scale
+            training_manager.sparse_index_share(step)
+            loss.backward()
+            del loss
         if step == warmup_steps[0] and idx == 0:
             report_memory("after_first_training_microbatch")
-    training_manager.step_optimizers(step)
-    model.quantize_mlp_fp8(bootstrap_down=True)
+    with preflight_cuda_stage("warmup_optimizer", step=step):
+        training_manager.step_optimizers(step)
+        model.quantize_mlp_fp8(bootstrap_down=True)
     if step == warmup_steps[0]:
         report_memory("after_first_optimizer_step")
 
 if RTX_PREFLIGHT:
     from portable_preflight import memory_gate_passes, memory_headroom_bytes
 
-    torch.cuda.synchronize()
+    with preflight_cuda_stage("warmup_sync"):
+        torch.cuda.synchronize()
     preflight_report(
         f"MODEL_WARMUP pass sampled_steps={warmup_steps} "
         f"peak_allocated_bytes={torch.cuda.max_memory_allocated(device)} "
@@ -2553,37 +2596,45 @@ if RTX_PREFLIGHT:
         args.train_files,
         TRAINING_STAGES[-1].batch_size,
         TRAINING_STAGES[-1].train_max_seq_len,
-        grad_accum_steps=grad_accum_steps,
+        microbatch_steps=train_grad_accum_steps,
     )
     model.train()
     model.zero_grad(set_to_none=True)
     torch.cuda.synchronize()
     for preflight_step in preflight_update_steps:
         training_manager.advance_schedule(preflight_step)
-        for _ in range(grad_accum_steps):
-            inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(
-                training_manager.train_loader_send_args
-            )
-            training_manager.sparse_index_update(preflight_step, bigram_cpu)
-            loss = model(
-                inputs,
-                targets,
-                cum_seqlens,
-                bigram_inputs,
-                *forward_call_args(inputs, cum_seqlens),
-            ).sum() * grad_scale
-            training_manager.sparse_index_share(preflight_step)
-            loss.backward()
-            del loss
-        training_manager.step_optimizers(preflight_step)
-        model.quantize_mlp_fp8(bootstrap_down=(preflight_step < 16))
-    torch.cuda.synchronize()
+        for microbatch_idx in range(train_grad_accum_steps):
+            with preflight_cuda_stage(
+                "worst_stage_training",
+                step=preflight_step,
+                microbatch=microbatch_idx,
+            ):
+                inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(
+                    training_manager.train_loader_send_args
+                )
+                training_manager.sparse_index_update(preflight_step, bigram_cpu)
+                loss = model(
+                    inputs,
+                    targets,
+                    cum_seqlens,
+                    bigram_inputs,
+                    *forward_call_args(inputs, cum_seqlens),
+                ).sum() * train_grad_scale
+                training_manager.sparse_index_share(preflight_step)
+                loss.backward()
+                del loss
+        with preflight_cuda_stage("worst_stage_optimizer", step=preflight_step):
+            training_manager.step_optimizers(preflight_step)
+            model.quantize_mlp_fp8(bootstrap_down=(preflight_step < 16))
+    with preflight_cuda_stage("worst_stage_sync"):
+        torch.cuda.synchronize()
 
-    # Terminal PORTABLE validation packs a longer per-rank sequence than training
-    # (524288/8 = 65536 tokens vs 49152) and widens the post-YaRN window to 20.
+    # Terminal PORTABLE validation packs a longer per-rank sequence than one-GPU
+    # training (524288/8 = 65536 tokens vs 393216/16 = 24576) and widens the
+    # post-YaRN window to 20.
     # Do not clear gradients here: the real even terminal update leaves Adam
     # gradients resident during this validation.
-    preflight_val_seq_len = validation_sequence_length(args.val_batch_size, world_size, grad_accum_steps)
+    preflight_val_seq_len = val_sequence_len
     training_manager.advance_schedule(training_schedule.total_steps)
     training_manager.apply_final_ws_ext()
     model.eval()
@@ -2591,15 +2642,21 @@ if RTX_PREFLIGHT:
         args.val_files,
         args.val_batch_size,
         -1,
-        grad_accum_steps=grad_accum_steps,
+        microbatch_steps=val_grad_accum_steps,
         align_to_bos=False,
     )
     with torch.no_grad():
-        for _ in range(grad_accum_steps):
-            inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
-            model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
+        for val_microbatch_idx in range(val_grad_accum_steps):
+            with preflight_cuda_stage(
+                "terminal_validation",
+                step=training_schedule.total_steps,
+                microbatch=val_microbatch_idx,
+            ):
+                inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
+                model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
     del val_loader
-    torch.cuda.synchronize()
+    with preflight_cuda_stage("terminal_validation_sync", step=training_schedule.total_steps):
+        torch.cuda.synchronize()
 
     free_memory, total_memory = torch.cuda.mem_get_info(device)
     peak_allocated = torch.cuda.max_memory_allocated(device)
@@ -2609,7 +2666,8 @@ if RTX_PREFLIGHT:
     local_pass = memory_gate_passes(total_memory, peak_reserved, min_headroom_gib)
     preflight_report(
         "MEMORY_COMPILE_WARMUP_UPDATE_VALIDATION "
-        f"world_size={world_size} grad_accum_steps={grad_accum_steps} "
+        f"world_size={world_size} train_grad_accum_steps={train_grad_accum_steps} "
+        f"val_grad_accum_steps={val_grad_accum_steps} "
         f"odd_update_step={odd_update_step} terminal_even_step={terminal_even_step} "
         f"validation_step={training_schedule.total_steps} val_sequence_length={preflight_val_seq_len} "
         f"total_bytes={total_memory} free_bytes={free_memory} "
@@ -2635,7 +2693,7 @@ else:
 ########################################
 #        Training and validation       #
 ########################################
-train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].batch_size, TRAINING_STAGES[0].train_max_seq_len, grad_accum_steps=grad_accum_steps)
+train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].batch_size, TRAINING_STAGES[0].train_max_seq_len, microbatch_steps=train_grad_accum_steps)
 
 gc.collect()
 
@@ -2661,8 +2719,8 @@ for step, last_step in run_plan.iterations():
         training_time_ms += 1000 * (time.perf_counter() - t0)
         model.eval()
         assert args.val_tokens % args.val_batch_size == 0
-        val_steps = grad_accum_steps * args.val_tokens // args.val_batch_size
-        val_loader = distributed_data_generator(args.val_files, args.val_batch_size, -1, grad_accum_steps=grad_accum_steps, align_to_bos=False)
+        val_steps = val_grad_accum_steps * args.val_tokens // args.val_batch_size
+        val_loader = distributed_data_generator(args.val_files, args.val_batch_size, -1, microbatch_steps=val_grad_accum_steps, align_to_bos=False)
         val_loss = 0
         with torch.no_grad():
             for _ in range(val_steps):
@@ -2688,10 +2746,10 @@ for step, last_step in run_plan.iterations():
         break
 
     # --------------- TRAINING SECTION -----------------
-    for idx in range(grad_accum_steps):
+    for idx in range(train_grad_accum_steps):
         inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(training_manager.train_loader_send_args)
         training_manager.sparse_index_update(step, bigram_cpu)
-        loss = model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).sum() * grad_scale
+        loss = model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).sum() * train_grad_scale
         training_manager.sparse_index_share(step)
         loss.backward()
         del loss
@@ -2707,7 +2765,7 @@ if args.run_evals:
     from evals import hellaswag
     hellaswag.evaluate(model=model, 
                        schedule_cfg=training_manager.get_forward_args(), 
-                       seq_len=args.val_batch_size // (grad_accum_steps * world_size),
+                       seq_len=val_sequence_len,
                        get_bigram_hash=get_bigram_hash, 
                        print0=print0)
 

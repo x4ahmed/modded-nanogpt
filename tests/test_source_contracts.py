@@ -144,6 +144,69 @@ class ScheduleContractTests(unittest.TestCase):
             "validation_batch_size(PORTABLE)",
         )
 
+    def test_training_accumulation_is_separate_from_validation_packing(self):
+        self.assertEqual(ast.unparse(module_assignment(TRAIN_TREE, "val_grad_accum_steps")), "8 // world_size")
+        self.assertEqual(
+            ast.unparse(module_assignment(TRAIN_TREE, "train_grad_accum_steps")),
+            "16 if PORTABLE and world_size == 1 else val_grad_accum_steps",
+        )
+        self.assertEqual(
+            ast.unparse(module_assignment(TRAIN_TREE, "train_grad_scale")),
+            "1 / train_grad_accum_steps",
+        )
+        self.assertNotIn(
+            "grad_accum_steps",
+            {node.id for node in ast.walk(TRAIN_TREE) if isinstance(node, ast.Name)},
+        )
+
+        val_length = ast.unparse(module_assignment(TRAIN_TREE, "val_sequence_len"))
+        self.assertIn("val_grad_accum_steps", val_length)
+        attention = ast.unparse(function_def(class_def(TRAIN_TREE, "CausalSelfAttention"), "forward"))
+        self.assertIn("if self.training else val_sequence_len", attention)
+
+        loader_calls = [
+            node
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "distributed_data_generator"
+        ]
+        train_calls = [call for call in loader_calls if ast.unparse(call.args[0]) == "args.train_files"]
+        val_calls = [call for call in loader_calls if ast.unparse(call.args[0]) == "args.val_files"]
+        self.assertTrue(train_calls and val_calls)
+        for calls, expected in (
+            (train_calls, "train_grad_accum_steps"),
+            (val_calls, "val_grad_accum_steps"),
+        ):
+            for call in calls:
+                microbatch_kw = next(kw for kw in call.keywords if kw.arg == "microbatch_steps")
+                self.assertEqual(ast.unparse(microbatch_kw.value), expected)
+
+        range_args = [
+            ast.unparse(node.args[0])
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "range"
+            and len(node.args) == 1
+        ]
+        self.assertEqual(range_args.count("train_grad_accum_steps"), 3)
+        self.assertEqual(range_args.count("val_grad_accum_steps"), 1)
+
+        val_steps = next(
+            node.value
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Assign)
+            and any(getattr(target, "id", None) == "val_steps" for target in node.targets)
+        )
+        self.assertIn("val_grad_accum_steps", ast.unparse(val_steps))
+
+        stage_divisibility = [
+            node
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Assert)
+            and "stage.batch_size % (world_size * train_grad_accum_steps)" in ast.unparse(node.test)
+        ]
+        self.assertEqual(len(stage_divisibility), 1)
+
 
 class PortableGuardTests(unittest.TestCase):
     def test_native_flash_attention_import_is_portable_guarded(self):
@@ -623,6 +686,34 @@ class PreflightContractTests(unittest.TestCase):
             and node.value.value is None
         )
         self.assertLess(retain_adam_grads.lineno, clear_grad.lineno)
+
+    def test_cuda_oom_is_structured_without_attempting_recovery(self):
+        guard = function_def(PORTABLE_PREFLIGHT_TREE, "cuda_oom_guard")
+        rendered = ast.unparse(guard)
+        self.assertIn("except torch_module.OutOfMemoryError", rendered)
+        self.assertIn("PREFLIGHT_OOM", rendered)
+        self.assertIn("PREFLIGHT_FINAL status=fail reason=cuda_oom", rendered)
+        for forbidden in ("synchronize", "all_reduce", "barrier", "empty_cache"):
+            self.assertNotIn(forbidden, rendered)
+
+        guarded_stages = {
+            ast.literal_eval(call.args[0])
+            for call in ast.walk(TRAIN_TREE)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "id", None) == "preflight_cuda_stage"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+        }
+        for required in (
+            "ce_preflight",
+            "model_construction",
+            "optimizer_construction",
+            "warmup_training",
+            "warmup_optimizer",
+            "worst_stage_training",
+            "terminal_validation",
+        ):
+            self.assertIn(required, guarded_stages)
 
 
 class LauncherContractTests(unittest.TestCase):
