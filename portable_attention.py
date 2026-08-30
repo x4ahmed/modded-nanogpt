@@ -64,8 +64,17 @@ def _build_document_block_mask(document_ids: Tensor, window_tokens: int) -> Bloc
     block_any = causal_any & window_any & document_any
     block_all = causal_all & window_all & document_all
 
-    partial_num, partial_indices = _dense_to_ordered(block_any & ~block_all)
+    block_partial = block_any & ~block_all
+    partial_num, partial_indices = _dense_to_ordered(block_partial)
     full_num, full_indices = _dense_to_ordered(block_all)
+    # Build the q-side tables here rather than through BlockMask.from_kv_blocks.
+    # That helper derives them with _transpose_ordered, which calls PyTorch's own
+    # _dense_to_ordered and its torch.argsort. Inductor lowers that argsort to a
+    # Triton sort needing 180,248 B of shared memory against SM120's 101,376 B, and
+    # because the call lives inside PyTorch it survives every change on our side.
+    # Transposing the dense matrices we already have costs nothing and is exact.
+    q_num, q_indices = _dense_to_ordered(block_partial.transpose(-2, -1))
+    full_q_num, full_q_indices = _dense_to_ordered(block_all.transpose(-2, -1))
 
     def document_causal_window(_batch, _head, q_idx, kv_idx):
         return (
@@ -74,14 +83,18 @@ def _build_document_block_mask(document_ids: Tensor, window_tokens: int) -> Bloc
             & (document_ids[q_idx] == document_ids[kv_idx])
         )
 
-    return BlockMask.from_kv_blocks(
-        partial_num,
-        partial_indices,
-        full_num,
-        full_indices,
-        BLOCK_SIZE=BLOCK_SIZE,
-        mask_mod=document_causal_window,
+    return BlockMask(
         seq_lengths=(num_tokens, num_tokens),
+        kv_num_blocks=partial_num,
+        kv_indices=partial_indices,
+        full_kv_num_blocks=full_num,
+        full_kv_indices=full_indices,
+        q_num_blocks=q_num,
+        q_indices=q_indices,
+        full_q_num_blocks=full_q_num,
+        full_q_indices=full_q_indices,
+        BLOCK_SIZE=(BLOCK_SIZE, BLOCK_SIZE),
+        mask_mod=document_causal_window,
     )
 
 

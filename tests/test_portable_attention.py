@@ -92,6 +92,43 @@ class BlockMaskSemanticsTests(unittest.TestCase):
                     self.assertTrue(torch.equal(counts, expected_counts))
                     self.assertTrue(torch.equal(indices, expected_indices))
 
+    def test_q_side_tables_match_pytorch_from_kv_blocks(self):
+        from torch.nn.attention.flex_attention import BlockMask
+
+        import portable_attention as pa
+
+        # We build the q-side tables ourselves instead of calling from_kv_blocks,
+        # whose _transpose_ordered runs torch.argsort inside PyTorch -- the Triton
+        # sort that blew SM120's shared-memory limit. The tables must still be
+        # exactly what that helper would have produced.
+        for length, window in ((256, 128), (512, 128), (512, 384)):
+            with self.subTest(length=length, window=window):
+                document_ids = torch.zeros(length, dtype=torch.int64)
+                for boundary in (37, 160, 289):
+                    document_ids[boundary:] += 1
+                mine = pa._build_document_block_mask(document_ids, window)
+                reference = BlockMask.from_kv_blocks(
+                    mine.kv_num_blocks,
+                    mine.kv_indices,
+                    mine.full_kv_num_blocks,
+                    mine.full_kv_indices,
+                    BLOCK_SIZE=pa.BLOCK_SIZE,
+                    mask_mod=mine.mask_mod,
+                    seq_lengths=(length, length),
+                )
+                for name in (
+                    "q_num_blocks",
+                    "q_indices",
+                    "full_q_num_blocks",
+                    "full_q_indices",
+                ):
+                    self.assertTrue(
+                        torch.equal(getattr(mine, name), getattr(reference, name)),
+                        f"{name} diverged from from_kv_blocks",
+                    )
+                self.assertEqual(mine.seq_lengths, reference.seq_lengths)
+                self.assertEqual(mine.BLOCK_SIZE, reference.BLOCK_SIZE)
+
     def test_partial_and_full_block_tables_match_exhaustive_oracle(self):
         block_size, length = 128, 512
         document_ids = torch.zeros(length, dtype=torch.int64)
