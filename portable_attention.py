@@ -88,3 +88,27 @@ def create_document_block_masks(
         _build_document_block_mask(document_ids, window)
         for window in window_tokens
     )
+
+
+# Inductor's default FlexAttention template at QK_HEAD_DIM=128 picks BLOCK_M=128,
+# BLOCK_N=64, num_stages=2 and requests 180,248 B of shared memory per block. SM120
+# (RTX 5090) caps at 101,376 B, so compilation dies with
+#   "No valid triton configs. OutOfResources: out of resource: shared memory,
+#    Required: 180248, Hardware limit: 101376"
+# Measured on an RTX 5090, 2026-08-30. This is a device limit, not a fallback: the
+# math is unchanged, only the tile sizes the template iterates with.
+#
+# The template asserts SPARSE_Q_BLOCK_SIZE % BLOCK_M == 0 and
+# SPARSE_KV_BLOCK_SIZE % BLOCK_N == 0, and both sparse sizes equal BLOCK_SIZE above,
+# so every value here must divide 128.
+KERNEL_OPTIONS = {
+    "BLOCK_M": 64,
+    "BLOCK_N": 64,
+    "num_stages": 1,
+    # Backward carries dq/dk/dv accumulators on top of the forward tiles, so it needs
+    # more headroom than the forward pass.
+    "BLOCK_M1": 32,
+    "BLOCK_N1": 64,
+    "BLOCK_M2": 64,
+    "BLOCK_N2": 32,
+}

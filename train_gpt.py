@@ -77,7 +77,7 @@ from dc_triton_kernels import (
     dc_attention_postonly_nodd_correction_add_base_triton,
 )
 if PORTABLE:
-    from portable_attention import create_document_block_masks
+    from portable_attention import KERNEL_OPTIONS as FLEX_KERNEL_OPTIONS, create_document_block_masks
     from torch.nn.attention.flex_attention import flex_attention
 # Fused triton kernel: relu(x @ W1.T)^2 @ W2.T
 # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
@@ -1196,6 +1196,7 @@ class CausalSelfAttention(nn.Module):
                 v.transpose(1, 2),
                 block_mask=attn_args.block_mask,
                 scale=yarn.attn_scale,
+                kernel_options=FLEX_KERNEL_OPTIONS,
             ).transpose(1, 2)[0].contiguous()
         else:
             # flash_attn_varlen suggested by @YouJiacheng

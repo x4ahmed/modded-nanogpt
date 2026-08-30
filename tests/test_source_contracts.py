@@ -205,6 +205,17 @@ class PortableGuardTests(unittest.TestCase):
         self.assertEqual(ast.unparse(normal_creator.keywords[0].value), "False")
         self.assertEqual(ast.unparse(paired_creator.keywords[0].value), "True")
 
+    def test_flex_attention_pins_kernel_options(self):
+        forward = function_def(class_def(TRAIN_TREE, "CausalSelfAttention"), "forward")
+        call = next(
+            node
+            for node in ast.walk(forward)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "flex_attention"
+        )
+        # Inductor's default tiles exceed SM120's shared-memory limit; the blocks
+        # must be pinned explicitly or compilation fails with no valid triton configs.
+        self.assertIn("kernel_options", [kw.arg for kw in call.keywords])
+
     def test_paired_head_layers_are_pinned(self):
         block = next(
             node

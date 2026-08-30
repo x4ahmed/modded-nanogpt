@@ -257,5 +257,37 @@ class FlexAttentionParityTests(unittest.TestCase):
         self.assertIsNotNone(q.grad)
 
 
+@unittest.skipIf(torch is None, "PyTorch is not installed")
+class KernelOptionTests(unittest.TestCase):
+    def test_block_sizes_divide_the_mask_block_size(self):
+        from portable_attention import BLOCK_SIZE, KERNEL_OPTIONS
+
+        # The FlexAttention template asserts SPARSE_Q_BLOCK_SIZE % BLOCK_M == 0 and
+        # SPARSE_KV_BLOCK_SIZE % BLOCK_N == 0; both sparse sizes are BLOCK_SIZE.
+        for key in ("BLOCK_M", "BLOCK_N", "BLOCK_M1", "BLOCK_N1", "BLOCK_M2", "BLOCK_N2"):
+            with self.subTest(key=key):
+                value = KERNEL_OPTIONS[key]
+                self.assertGreater(value, 0)
+                self.assertLessEqual(value, BLOCK_SIZE)
+                self.assertEqual(BLOCK_SIZE % value, 0)
+
+    def test_tiles_fit_the_sm120_shared_memory_limit(self):
+        from portable_attention import KERNEL_OPTIONS
+
+        # Rough lower bound on the forward template's shared memory at head_dim 128:
+        # a bf16 Q tile, pipelined bf16 K and V tiles, and an fp32 score tile. The
+        # default 128/64/num_stages=2 config measured 180,248 B against SM120's
+        # 101,376 B ceiling, so keep a wide margin here rather than a tight estimate.
+        head_dim, sm120_limit = 128, 101_376
+        block_m, block_n = KERNEL_OPTIONS["BLOCK_M"], KERNEL_OPTIONS["BLOCK_N"]
+        stages = KERNEL_OPTIONS["num_stages"]
+        estimate = (
+            block_m * head_dim * 2
+            + 2 * block_n * head_dim * 2 * stages
+            + block_m * block_n * 4
+        )
+        self.assertLess(estimate, sm120_limit)
+
+
 if __name__ == "__main__":
     unittest.main()
