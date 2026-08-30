@@ -27,6 +27,7 @@ class RuntimeConfig:
     run_id: str
     seed: int | None
     max_steps: int | None
+    python_hash_seed: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,21 +89,19 @@ def parse_runtime_config(
             parser.error("--run-id is required when PORTABLE=1")
         if parsed.seed is None:
             parser.error("--seed is required when PORTABLE=1")
-        hash_seed = env.get("PYTHONHASHSEED")
-        try:
-            hash_seed_value = int(hash_seed, 10) if hash_seed is not None else None
-        except ValueError:
-            hash_seed_value = None
-        if hash_seed_value != parsed.seed:
-            parser.error("PYTHONHASHSEED must be set to the same value as --seed by the launcher")
     elif parsed.seed is not None or parsed.max_steps is not None:
         parser.error("--seed and --max-steps require PORTABLE=1")
 
+    # PYTHONHASHSEED is recorded for the run manifest but deliberately not enforced:
+    # nothing in the training path depends on hash ordering (no shuffle, and no set or
+    # dict iteration feeds RNG, data order, or parameter construction), so requiring it
+    # would only add a way for an otherwise-correct run to fail at argument parsing.
     return RuntimeConfig(
         portable=portable,
         run_id=parsed.run_id or str(uuid.uuid4()),
         seed=parsed.seed,
         max_steps=parsed.max_steps,
+        python_hash_seed=env.get("PYTHONHASHSEED"),
     )
 
 

@@ -2333,7 +2333,10 @@ print0("="*100)
 # log information about the hardware/software environment this is running on
 git_metadata = collect_git_metadata(script_dir)
 print0(f"run_id={runtime_config.run_id}")
-print0(f"seed={runtime_config.seed if PORTABLE else 'native-randomness'}")
+print0(
+    f"seed={runtime_config.seed if PORTABLE else 'native-randomness'} "
+    f"python_hash_seed={runtime_config.python_hash_seed or 'unset'}"
+)
 print0(f"git_commit={git_metadata['git_commit']} git_dirty={git_metadata['git_dirty']}")
 print0(f"PORTABLE={int(PORTABLE)} world_size={world_size} grad_accum_steps={grad_accum_steps}")
 print0(
@@ -2451,10 +2454,15 @@ if RTX_PREFLIGHT:
     del inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu
     gc.collect()
 
-    # Step 1271 is the largest extension-stage batch/window and is odd, so the
-    # measured update exercises all four accumulation microbatches and both optimizers.
-    preflight_step = 1271
-    training_manager.advance_schedule(preflight_step)
+    # Exercise both optimizer paths at the worst stage, then reproduce the real
+    # terminal memory state. The final training update is even, so Adam gradients
+    # remain resident during terminal validation.
+    odd_update_step = training_schedule.scheduled_iterations + 1
+    terminal_even_step = training_schedule.total_steps - 1
+    assert odd_update_step % 2 == 1
+    assert terminal_even_step % 2 == 0
+    preflight_update_steps = (odd_update_step, terminal_even_step)
+    training_manager.advance_schedule(odd_update_step)
     train_loader = distributed_data_generator(
         args.train_files,
         TRAINING_STAGES[-1].batch_size,
@@ -2464,23 +2472,47 @@ if RTX_PREFLIGHT:
     model.train()
     model.zero_grad(set_to_none=True)
     torch.cuda.synchronize()
-    for _ in range(grad_accum_steps):
-        inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(
-            training_manager.train_loader_send_args
-        )
-        training_manager.sparse_index_update(preflight_step, bigram_cpu)
-        loss = model(
-            inputs,
-            targets,
-            cum_seqlens,
-            bigram_inputs,
-            training_manager.get_forward_args(),
-        ).sum() * grad_scale
-        training_manager.sparse_index_share(preflight_step)
-        loss.backward()
-        del loss
-    training_manager.step_optimizers(preflight_step)
-    model.quantize_mlp_fp8(bootstrap_down=False)
+    for preflight_step in preflight_update_steps:
+        training_manager.advance_schedule(preflight_step)
+        for _ in range(grad_accum_steps):
+            inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(
+                training_manager.train_loader_send_args
+            )
+            training_manager.sparse_index_update(preflight_step, bigram_cpu)
+            loss = model(
+                inputs,
+                targets,
+                cum_seqlens,
+                bigram_inputs,
+                training_manager.get_forward_args(),
+            ).sum() * grad_scale
+            training_manager.sparse_index_share(preflight_step)
+            loss.backward()
+            del loss
+        training_manager.step_optimizers(preflight_step)
+        model.quantize_mlp_fp8(bootstrap_down=(preflight_step < 16))
+    torch.cuda.synchronize()
+
+    # Terminal PORTABLE validation packs a longer per-rank sequence than training
+    # (524288/8 = 65536 tokens vs 49152) and widens the post-YaRN window to 20.
+    # Do not clear gradients here: the real even terminal update leaves Adam
+    # gradients resident during this validation.
+    preflight_val_seq_len = validation_sequence_length(args.val_batch_size, world_size, grad_accum_steps)
+    training_manager.advance_schedule(training_schedule.total_steps)
+    training_manager.apply_final_ws_ext()
+    model.eval()
+    val_loader = distributed_data_generator(
+        args.val_files,
+        args.val_batch_size,
+        -1,
+        grad_accum_steps=grad_accum_steps,
+        align_to_bos=False,
+    )
+    with torch.no_grad():
+        for _ in range(grad_accum_steps):
+            inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
+            model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).mean()
+    del val_loader
     torch.cuda.synchronize()
 
     free_memory, total_memory = torch.cuda.mem_get_info(device)
@@ -2490,8 +2522,10 @@ if RTX_PREFLIGHT:
     headroom = memory_headroom_bytes(total_memory, peak_reserved)
     local_pass = memory_gate_passes(total_memory, peak_reserved, min_headroom_gib)
     preflight_report(
-        "MEMORY_COMPILE_WARMUP_UPDATE "
-        f"step={preflight_step} total_bytes={total_memory} free_bytes={free_memory} "
+        "MEMORY_COMPILE_WARMUP_UPDATE_VALIDATION "
+        f"odd_update_step={odd_update_step} terminal_even_step={terminal_even_step} "
+        f"validation_step={training_schedule.total_steps} val_sequence_length={preflight_val_seq_len} "
+        f"total_bytes={total_memory} free_bytes={free_memory} "
         f"peak_allocated_bytes={peak_allocated} peak_reserved_bytes={peak_reserved} "
         f"headroom_bytes={headroom} min_headroom_gib={min_headroom_gib:g} "
         f"status={'pass' if local_pass else 'fail'}"

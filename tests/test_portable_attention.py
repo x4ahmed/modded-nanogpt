@@ -1,7 +1,14 @@
 from __future__ import annotations
 
-import importlib.util
+import sys
 import unittest
+from pathlib import Path
+
+if __package__:
+    from .gpu import require_triton, requires_cuda
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from gpu import require_triton, requires_cuda
 
 try:
     import torch
@@ -99,7 +106,7 @@ class BlockMaskSemanticsTests(unittest.TestCase):
                 torch.testing.assert_close(full_actual, full_oracle)
 
 
-@unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA FlexAttention not available")
+@requires_cuda
 class FlexAttentionParityTests(unittest.TestCase):
     @staticmethod
     def dense_attention(q, k, v, document_ids, window, scale):
@@ -175,8 +182,7 @@ class FlexAttentionParityTests(unittest.TestCase):
         torch.testing.assert_close(actual.float(), expected_pair, atol=4e-2, rtol=4e-2)
 
     def test_mask_creation_and_flex_call_compile_fullgraph(self):
-        if importlib.util.find_spec("triton") is None:
-            self.skipTest("Triton compiler is not installed")
+        require_triton()
         from portable_attention import create_document_block_masks
         from torch.nn.attention.flex_attention import flex_attention
 

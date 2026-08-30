@@ -36,13 +36,21 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertIsNone(config.seed)
         self.assertIsNone(config.max_steps)
 
-    def test_portable_requires_run_id_seed_and_launcher_hash_seed(self):
+    def test_portable_requires_run_id_and_seed(self):
         self.parse_error([], {"PORTABLE": "1"})
         self.parse_error(["--run-id", "run"], {"PORTABLE": "1"})
-        self.parse_error(
-            ["--run-id", "run", "--seed", "7"],
-            {"PORTABLE": "1", "PYTHONHASHSEED": "8"},
-        )
+
+    def test_python_hash_seed_is_recorded_but_not_enforced(self):
+        # Nothing in the training path depends on hash ordering, so a mismatched or
+        # absent PYTHONHASHSEED must not fail an otherwise-valid run. It is captured
+        # for the manifest instead.
+        argv = ["--run-id", "run", "--seed", "7"]
+        mismatched = parse_runtime_config(argv, {"PORTABLE": "1", "PYTHONHASHSEED": "8"})
+        self.assertEqual(mismatched.seed, 7)
+        self.assertEqual(mismatched.python_hash_seed, "8")
+        absent = parse_runtime_config(argv, {"PORTABLE": "1"})
+        self.assertEqual(absent.seed, 7)
+        self.assertIsNone(absent.python_hash_seed)
 
     def test_portable_accepts_seed_boundaries(self):
         for seed in (0, 2**32 - 1):

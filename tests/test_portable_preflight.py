@@ -65,6 +65,8 @@ class PreflightCliTypeTests(unittest.TestCase):
             RTX_PREFLIGHT.main()
         child_env = execve.call_args.args[2]
         self.assertEqual(child_env["PORTABLE"], "1")
+        self.assertEqual(child_env["RTX_PREFLIGHT"], "1")
+        self.assertEqual(child_env["_RTX_DEFER_CE_INIT"], "1")
         self.assertEqual(child_env["PYTHONHASHSEED"], "9")
         self.assertEqual(child_env["RTX_MIN_HEADROOM_GIB"], "2.0")
 
