@@ -11,30 +11,17 @@ BLOCK_SIZE = 128
 
 
 def _dense_to_ordered(dense_mask: Tensor) -> tuple[Tensor, Tensor]:
-    """Selected columns first in ascending order, unselected after, without a sort.
+    """Selected columns first in ascending order, unselected after.
 
-    This is exactly `argsort(dim=-1, descending=True, stable=True)` on a boolean mask,
-    computed with cumsum and scatter instead. Inductor lowers torch.argsort to a Triton
-    bitonic sort that stages values and indices in shared memory; at the PORTABLE eval
-    sequence length the mask is 512x512 and the kernel requested 180,248 B against
-    SM120's 101,376 B limit, failing with "No valid triton configs". Measured on an
-    RTX 5090, 2026-08-30. cumsum and scatter carry no such block-size pressure.
+    Plain argsort. These masks are built in eager mode, outside the compiled region --
+    see build_window_masks -- where argsort is a CUB radix sort with no Triton
+    block-size pressure. Building them inside torch.compile is what forced two
+    successive rewrites here: argsort lowered to a Triton bitonic sort that wanted
+    180,248 B of shared memory against SM120's 101,376 B, and the cumsum/scatter
+    replacement hit an inductor codegen bug on the scatter. Keep this eager.
     """
     num_blocks = dense_mask.sum(dim=-1, dtype=torch.int32)
-    selected = dense_mask.to(torch.int64)
-    # Rank among selected entries, and among unselected entries, both in column order.
-    selected_rank = selected.cumsum(dim=-1) - 1
-    unselected_rank = (1 - selected).cumsum(dim=-1) - 1
-    slot = torch.where(
-        dense_mask,
-        selected_rank,
-        num_blocks.to(torch.int64)[..., None] + unselected_rank,
-    )
-    columns = torch.arange(
-        dense_mask.shape[-1], device=dense_mask.device, dtype=torch.int32
-    ).expand_as(dense_mask)
-    indices = torch.empty_like(columns)
-    indices.scatter_(-1, slot, columns)
+    indices = dense_mask.argsort(dim=-1, descending=True, stable=True).to(torch.int32)
     return num_blocks[None, None].contiguous(), indices[None, None].contiguous()
 
 
@@ -64,17 +51,8 @@ def _build_document_block_mask(document_ids: Tensor, window_tokens: int) -> Bloc
     block_any = causal_any & window_any & document_any
     block_all = causal_all & window_all & document_all
 
-    block_partial = block_any & ~block_all
-    partial_num, partial_indices = _dense_to_ordered(block_partial)
+    partial_num, partial_indices = _dense_to_ordered(block_any & ~block_all)
     full_num, full_indices = _dense_to_ordered(block_all)
-    # Build the q-side tables here rather than through BlockMask.from_kv_blocks.
-    # That helper derives them with _transpose_ordered, which calls PyTorch's own
-    # _dense_to_ordered and its torch.argsort. Inductor lowers that argsort to a
-    # Triton sort needing 180,248 B of shared memory against SM120's 101,376 B, and
-    # because the call lives inside PyTorch it survives every change on our side.
-    # Transposing the dense matrices we already have costs nothing and is exact.
-    q_num, q_indices = _dense_to_ordered(block_partial.transpose(-2, -1))
-    full_q_num, full_q_indices = _dense_to_ordered(block_all.transpose(-2, -1))
 
     def document_causal_window(_batch, _head, q_idx, kv_idx):
         return (
@@ -83,18 +61,16 @@ def _build_document_block_mask(document_ids: Tensor, window_tokens: int) -> Bloc
             & (document_ids[q_idx] == document_ids[kv_idx])
         )
 
-    return BlockMask(
-        seq_lengths=(num_tokens, num_tokens),
-        kv_num_blocks=partial_num,
-        kv_indices=partial_indices,
-        full_kv_num_blocks=full_num,
-        full_kv_indices=full_indices,
-        q_num_blocks=q_num,
-        q_indices=q_indices,
-        full_q_num_blocks=full_q_num,
-        full_q_indices=full_q_indices,
-        BLOCK_SIZE=(BLOCK_SIZE, BLOCK_SIZE),
+    # from_kv_blocks derives the q-side tables with its own argsort. That is fine here
+    # because build_window_masks runs eagerly; it was not fine inside torch.compile.
+    return BlockMask.from_kv_blocks(
+        partial_num,
+        partial_indices,
+        full_num,
+        full_indices,
+        BLOCK_SIZE=BLOCK_SIZE,
         mask_mod=document_causal_window,
+        seq_lengths=(num_tokens, num_tokens),
     )
 
 
@@ -123,6 +99,26 @@ def create_document_block_masks(
         _build_document_block_mask(document_ids, window)
         for window in window_tokens
     )
+
+
+def build_window_masks(
+    seqlens: Tensor, num_tokens: int, ws_short: int, ws_long: int
+) -> tuple[BlockMask, BlockMask, BlockMask]:
+    """The three masks a forward pass needs: (normal short, normal long, paired short).
+
+    MUST be called outside the compiled region. BlockMask construction is tensor work
+    that torch.compile has no reason to trace, and tracing it is what produced both the
+    Triton shared-memory failure and the inductor scatter codegen bug on SM120. Built
+    eagerly and passed in, the compiled graph sees a finished BlockMask -- the pattern
+    FlexAttention documents.
+    """
+    normal_short, normal_long = create_document_block_masks(
+        seqlens, num_tokens, (ws_short, ws_long), paired=False
+    )
+    (paired_short,) = create_document_block_masks(
+        seqlens, num_tokens, (ws_short,), paired=True
+    )
+    return normal_short, normal_long, paired_short
 
 
 # Inductor's default FlexAttention template at QK_HEAD_DIM=128 picks BLOCK_M=128,

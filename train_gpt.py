@@ -77,7 +77,7 @@ from dc_triton_kernels import (
     dc_attention_postonly_nodd_correction_add_base_triton,
 )
 if PORTABLE:
-    from portable_attention import KERNEL_OPTIONS as FLEX_KERNEL_OPTIONS, create_document_block_masks
+    from portable_attention import KERNEL_OPTIONS as FLEX_KERNEL_OPTIONS, build_window_masks
     from torch.nn.attention.flex_attention import flex_attention
 # Fused triton kernel: relu(x @ W1.T)^2 @ W2.T
 # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
@@ -1556,7 +1556,7 @@ class GPT(nn.Module):
             bigram_gates[layer] = gate[..., offset + 1:offset + 2]
         return gate[..., 28:29]
 
-    def forward(self, input_seq: Tensor, target_seq: Tensor, seqlens: Tensor, bigram_input_seq: Tensor, schedule_cfg: ForwardScheduleConfig):
+    def forward(self, input_seq: Tensor, target_seq: Tensor, seqlens: Tensor, bigram_input_seq: Tensor, schedule_cfg: ForwardScheduleConfig, window_masks=None):
         assert input_seq.ndim == 1
 
         # ---- Schedule and layer topology ----
@@ -1568,18 +1568,11 @@ class GPT(nn.Module):
         assert len(bm_sizes) == self.num_layers
         key_offset = [b==ws_long for b in bm_sizes] # apply partial key offset to long windows
         if PORTABLE:
-            normal_short_mask, normal_long_mask = create_document_block_masks(
-                seqlens,
-                input_seq.numel(),
-                (ws_short, ws_long),
-                paired=False,
-            )
-            (paired_short_mask,) = create_document_block_masks(
-                seqlens,
-                input_seq.numel(),
-                (ws_short,),
-                paired=True,
-            )
+            # Built eagerly by forward_call_args and passed in. Constructing them here
+            # put BlockMask tensor work inside the fullgraph region, which cost two
+            # separate SM120 compile failures before it was moved out.
+            assert window_masks is not None, "PORTABLE forward needs prebuilt block masks"
+            normal_short_mask, normal_long_mask, paired_short_mask = window_masks
             block_masks = [
                 paired_short_mask,
                 normal_short_mask,
@@ -2328,6 +2321,22 @@ def preflight_report(s):
         with open(logfile, "a") as f:
             print(line, file=f)
 
+def forward_call_args(inputs, cum_seqlens):
+    """Schedule config plus, under PORTABLE, eagerly built FlexAttention block masks.
+
+    Splat into the model call. The masks must be constructed here rather than inside
+    GPT.forward: BlockMask building is tensor work torch.compile has no reason to
+    trace, and tracing it produced both the Triton shared-memory failure and the
+    inductor scatter codegen bug on SM120.
+    """
+    schedule_cfg = training_manager.get_forward_args()
+    if not PORTABLE:
+        return schedule_cfg, None
+    window_masks = build_window_masks(
+        cum_seqlens, inputs.numel(), schedule_cfg.ws_short, schedule_cfg.ws_long
+    )
+    return schedule_cfg, window_masks
+
 # begin by printing this file (the Python code)
 print0(code)
 print0("="*100)
@@ -2429,13 +2438,13 @@ for step in warmup_steps:
     model.eval()
     with torch.no_grad():
         inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
-        model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).mean()
+        model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
     model.train()
     for idx in range(grad_accum_steps):
         send_args = training_manager.train_loader_send_args
         inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(send_args)
         training_manager.sparse_index_update(step, bigram_cpu)
-        loss = model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).sum() * grad_scale
+        loss = model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).sum() * grad_scale
         training_manager.sparse_index_share(step)
         loss.backward()
         del loss
@@ -2485,7 +2494,7 @@ if RTX_PREFLIGHT:
                 targets,
                 cum_seqlens,
                 bigram_inputs,
-                training_manager.get_forward_args(),
+                *forward_call_args(inputs, cum_seqlens),
             ).sum() * grad_scale
             training_manager.sparse_index_share(preflight_step)
             loss.backward()
@@ -2512,7 +2521,7 @@ if RTX_PREFLIGHT:
     with torch.no_grad():
         for _ in range(grad_accum_steps):
             inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
-            model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).mean()
+            model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
     del val_loader
     torch.cuda.synchronize()
 
@@ -2582,7 +2591,7 @@ for step, last_step in run_plan.iterations():
         with torch.no_grad():
             for _ in range(val_steps):
                 inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
-                val_loss += model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).mean()
+                val_loss += model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
         val_loss /= val_steps
         del val_loader
         dist.reduce(val_loss, 0, op=dist.ReduceOp.AVG)
@@ -2606,7 +2615,7 @@ for step, last_step in run_plan.iterations():
     for idx in range(grad_accum_steps):
         inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = train_loader.send(training_manager.train_loader_send_args)
         training_manager.sparse_index_update(step, bigram_cpu)
-        loss = model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).sum() * grad_scale
+        loss = model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).sum() * grad_scale
         training_manager.sparse_index_share(step)
         loss.backward()
         del loss

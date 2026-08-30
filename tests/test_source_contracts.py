@@ -159,7 +159,7 @@ class PortableGuardTests(unittest.TestCase):
             for node in ast.walk(forward)
             if isinstance(node, ast.If)
             and ast.unparse(node.test) == "PORTABLE"
-            and "create_document_block_masks" in ast.unparse(node)
+            and "block_masks" in ast.unparse(node)
         )
         portable_body = ast.Module(body=portable_branch.body, type_ignores=[])
         assignments = {
@@ -189,21 +189,38 @@ class PortableGuardTests(unittest.TestCase):
              "normal_short_mask", "paired_short_mask", "normal_long_mask"],
         )
 
-        mask_creators = [
+        # The masks must arrive prebuilt. Constructing a BlockMask inside this
+        # fullgraph-compiled forward cost two separate SM120 compile failures: the
+        # argsort became a Triton sort over the shared-memory limit, and its
+        # cumsum/scatter replacement hit an inductor codegen bug.
+        rendered_forward = ast.unparse(forward)
+        for builder in ("create_document_block_masks", "build_window_masks", "BlockMask"):
+            self.assertNotIn(builder, rendered_forward)
+        self.assertIn("window_masks", [arg.arg for arg in forward.args.args])
+        self.assertIn("normal_short_mask, normal_long_mask, paired_short_mask = window_masks", ast.unparse(portable_body))
+
+    def test_block_masks_are_built_outside_the_compiled_model(self):
+        builder = function_def(TRAIN_TREE, "forward_call_args")
+        rendered = ast.unparse(builder)
+        self.assertIn("build_window_masks", rendered)
+        self.assertIn("schedule_cfg.ws_short", rendered)
+        self.assertIn("schedule_cfg.ws_long", rendered)
+        # Native runs must not pay for masks they never use.
+        self.assertIn("if not PORTABLE", rendered)
+
+        # Every model call must splat the helper, so no path can reach the compiled
+        # forward without prebuilt masks.
+        calls = [
             node
-            for node in ast.walk(portable_body)
-            if isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and getattr(node.value.func, "id", None) == "create_document_block_masks"
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "model"
+            and any(isinstance(a, ast.Starred) for a in node.args)
         ]
-        self.assertEqual(len(mask_creators), 2)
-        creators_by_target = {ast.unparse(node.targets[0]): node.value for node in mask_creators}
-        normal_creator = creators_by_target["(normal_short_mask, normal_long_mask)"]
-        paired_creator = creators_by_target["(paired_short_mask,)"]
-        self.assertEqual(ast.unparse(normal_creator.args[2]), "(ws_short, ws_long)")
-        self.assertEqual(ast.unparse(paired_creator.args[2]), "(ws_short,)")
-        self.assertEqual(ast.unparse(normal_creator.keywords[0].value), "False")
-        self.assertEqual(ast.unparse(paired_creator.keywords[0].value), "True")
+        self.assertGreaterEqual(len(calls), 5)
+        for call in calls:
+            starred = next(a for a in call.args if isinstance(a, ast.Starred))
+            self.assertEqual(ast.unparse(starred.value), "forward_call_args(inputs, cum_seqlens)")
 
     def test_flex_attention_pins_kernel_options(self):
         forward = function_def(class_def(TRAIN_TREE, "CausalSelfAttention"), "forward")
