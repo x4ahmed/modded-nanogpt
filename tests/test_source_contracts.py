@@ -393,8 +393,10 @@ class PreflightContractTests(unittest.TestCase):
 
     def test_preflight_refuses_fallbacks_and_wrong_world_size(self):
         rendered = ast.unparse(PREFLIGHT_TREE)
-        self.assertIn("os.environ.get('WORLD_SIZE') != '2'", rendered)
-        self.assertIn("os.environ.get('LOCAL_WORLD_SIZE') != '2'", rendered)
+        # 1 and 2 ranks are both gateable; anything else must be refused.
+        self.assertIn("os.environ.get('WORLD_SIZE')", rendered)
+        self.assertIn("{'1', '2'}", rendered)
+        self.assertIn("os.environ.get('LOCAL_WORLD_SIZE') != world_size", rendered)
         self.assertIn("os.environ.get('DISABLE_FP8')", rendered)
 
     def test_memory_gate_spans_warmup_update_and_validation(self):

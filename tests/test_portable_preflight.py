@@ -70,6 +70,27 @@ class PreflightCliTypeTests(unittest.TestCase):
         self.assertEqual(child_env["PYTHONHASHSEED"], "9")
         self.assertEqual(child_env["RTX_MIN_HEADROOM_GIB"], "2.0")
 
+    def test_bootstrap_accepts_one_rank_and_rejects_other_sizes(self):
+        def run(world_size, local_world_size):
+            env = {"WORLD_SIZE": world_size, "LOCAL_WORLD_SIZE": local_world_size, "RANK": "0"}
+            with (
+                mock.patch.object(RTX_PREFLIGHT.sys, "argv", ["rtx_preflight.py", "--seed", "9"]),
+                mock.patch.dict(RTX_PREFLIGHT.os.environ, env, clear=True),
+                mock.patch.object(RTX_PREFLIGHT.os, "execve") as execve,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                RTX_PREFLIGHT.main()
+            return execve.call_args.args[2]
+
+        # A single rank is a legitimate baseline configuration to gate.
+        self.assertEqual(run("1", "1")["RTX_PREFLIGHT"], "1")
+        self.assertEqual(run("2", "2")["RTX_PREFLIGHT"], "1")
+        for world_size, local_world_size in (("4", "4"), ("8", "8"), ("0", "0"), ("2", "1")):
+            with self.subTest(world_size=world_size, local_world_size=local_world_size):
+                with self.assertRaises(SystemExit):
+                    run(world_size, local_world_size)
+
     def test_bootstrap_rejects_fp8_fallback(self):
         env = {
             "WORLD_SIZE": "2",

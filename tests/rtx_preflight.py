@@ -43,8 +43,12 @@ def main() -> None:
     parser.add_argument("--local-rank", "--local_rank", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    if os.environ.get("WORLD_SIZE") != "2" or os.environ.get("LOCAL_WORLD_SIZE") != "2":
-        parser.error("run with torchrun --standalone --nproc_per_node=2")
+    # 1 and 2 ranks are both valid baselines. They are NOT interchangeable: at
+    # world_size=1 the optimizer state is unsharded and the comms path collapses to
+    # "none", so gate whichever configuration you intend to actually run.
+    world_size = os.environ.get("WORLD_SIZE")
+    if world_size not in {"1", "2"} or os.environ.get("LOCAL_WORLD_SIZE") != world_size:
+        parser.error("run with torchrun --standalone --nproc_per_node=1 or --nproc_per_node=2")
     if os.environ.get("DISABLE_FP8"):
         parser.error("DISABLE_FP8 must be unset; the preflight does not permit fallbacks")
 

@@ -100,11 +100,11 @@ dist.barrier()
 master_process = (rank == 0) # this process will do logging, checkpointing etc.
 if RTX_PREFLIGHT and (
     not PORTABLE
-    or world_size != 2
-    or grad_accum_steps != 4
+    or world_size not in (1, 2)
+    or grad_accum_steps != 8 // world_size
     or os.environ.get("_RTX_DEFER_CE_INIT") != "1"
 ):
-    raise RuntimeError("RTX preflight requires PORTABLE=1 with exactly two torchrun ranks")
+    raise RuntimeError("RTX preflight requires PORTABLE=1 with one or two torchrun ranks")
 if PORTABLE:
     assert runtime_config.seed is not None
     seed_everything(
@@ -2523,6 +2523,7 @@ if RTX_PREFLIGHT:
     local_pass = memory_gate_passes(total_memory, peak_reserved, min_headroom_gib)
     preflight_report(
         "MEMORY_COMPILE_WARMUP_UPDATE_VALIDATION "
+        f"world_size={world_size} grad_accum_steps={grad_accum_steps} "
         f"odd_update_step={odd_update_step} terminal_even_step={terminal_even_step} "
         f"validation_step={training_schedule.total_steps} val_sequence_length={preflight_val_seq_len} "
         f"total_bytes={total_memory} free_bytes={free_memory} "
