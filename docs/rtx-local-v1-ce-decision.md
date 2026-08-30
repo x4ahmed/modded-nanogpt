@@ -1,24 +1,34 @@
 # RTX-local-v1 CE decision
 
-Status: **PENDING RTX 5090 preflight**
+Status: **RESOLVED — target `90` kept.** Verified on an RTX 5090 (`tujestpolin`,
+2026-08-30, one rank, torch 2.10.0+cu128).
 
 ```bash
-torchrun --standalone --nproc_per_node=2 tests/rtx_preflight.py --seed 7
+torchrun --standalone --nproc_per_node=1 tests/rtx_preflight.py --seed 999
 ```
 
-Keep the fused CE kernel's compute target at `90` until the SM120 preflight provides
-device evidence. The kernel requests `100,608 B` dynamic shared memory and declares at
-least `64 B` static shared memory (`100,672 B` minimum total). No fallback is authorized.
+The fused CE kernel's compute target stays at `90`. PyTorch emits PTX, and the
+sm_90 PTX JITs onto SM120 without change. No fallback was needed or added.
 
-The executable preflight records these stages separately:
+## Measured evidence
 
-| Stage | Required evidence |
+| Stage | Result |
 |---|---|
-| `CE_COMPILE` | target `90` compiles/loads on SM120 |
-| `CE_SHARED_CONFIG` | `set_shared_memory_config(100608)` succeeds; opt-in limit logged |
-| `CE_LAUNCH` | minimal raw kernel launch enqueues |
-| `CE_SYNC` | device synchronization succeeds |
-| `CE_PARITY` | loss and FP8 logit-gradient metrics pass the eager reference |
+| `CE_COMPILE` | pass, `target=90` |
+| `CE_SHARED_CONFIG` | pass — `dynamic=100608`, `static_min=64`, `total_min=100672`, device opt-in limit `101376` |
+| `CE_LAUNCH` | pass |
+| `CE_SYNC` | pass |
+| `CE_PARITY` | pass — `loss_max_abs=2.86e-06`, `grad_rel_l2=0`, `grad_cosine=1`, `grad_exact_fraction=1` |
 
-Decision after the run: keep target `90` only if every stage passes. Otherwise record the
-first failing stage and investigate that cause before changing the target or kernel.
+The kernel fits with **704 bytes** of headroom against SM120's per-block opt-in
+ceiling, and the FP8 logit gradients matched the eager reference exactly. The
+margin is real but thin: any increase in `CE_KERNEL_VOCAB_SIZE` or in the
+kernel's static shared memory would exceed the limit on this hardware.
+
+## Related finding from the same run
+
+The CE kernel fits; Inductor's **FlexAttention** template did not. Its default
+tiles at `QK_HEAD_DIM=128` requested `180,248 B` against the same `101,376 B`
+ceiling, failing with "No valid triton configs". Fixed by pinning tile sizes in
+`portable_attention.KERNEL_OPTIONS` — see that module for the reasoning. Same
+hardware limit, different kernel, and unrelated to the CE compute target.
