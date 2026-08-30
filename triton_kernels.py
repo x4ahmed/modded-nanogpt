@@ -5,6 +5,8 @@ import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
 
+from portable_runtime import select_mlp_block_config
+
 # -----------------------------------------------------------------------------
 # Triton kernel for symmetric matrix multiplication by @byronxu99
 
@@ -584,9 +586,11 @@ def _get_dummy_f32(device):
 # Required: 180248, Hardware limit: 101376". Measured on an RTX 5090, 2026-08-30.
 #
 # Tiles and pipeline depth change only how the kernel iterates; the arithmetic and the
-# output are identical. Devices with H100-class shared memory keep the original
-# configuration exactly, so the record path is untouched.
-_H100_CLASS_SHARED_MEMORY = 160 * 1024
+# output are identical. Selection compares the configuration's computed requirement
+# against the device's own opt-in limit, so any device with room keeps the original
+# H100 tiles and the record path is untouched. A fixed cutoff would be wrong: an A100
+# offers exactly 163,840 B, which is under the 181 KB the original configuration needs
+# but over any "160 KiB means large" threshold.
 _MLP_BLOCK_CONFIG_CACHE: dict[tuple[int, bool], tuple[int, int, int, int]] = {}
 
 
@@ -601,13 +605,7 @@ def _mlp_block_config(device, use_fp8: bool) -> tuple[int, int, int, int]:
     key = (index, use_fp8)
     cached = _MLP_BLOCK_CONFIG_CACHE.get(key)
     if cached is None:
-        block_k = 128 if use_fp8 else 64
-        if _device_shared_memory_limit(device) >= _H100_CLASS_SHARED_MEMORY:
-            cached = (128, 256, block_k, 4)
-        else:
-            # 2 stages x (128x64 + 128x64) x 2 bytes + a 128x64 bf16 output tile
-            # = 81,920 B, comfortably inside SM120's 101,376 B.
-            cached = (128, 128, block_k, 2)
+        cached = select_mlp_block_config(_device_shared_memory_limit(device), use_fp8)
         _MLP_BLOCK_CONFIG_CACHE[key] = cached
     return cached
 

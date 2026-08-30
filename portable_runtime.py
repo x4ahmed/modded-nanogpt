@@ -116,6 +116,56 @@ def make_run_plan(full_schedule_steps: int, max_steps: int | None) -> RunPlan:
     return RunPlan(optimizer_steps, full_schedule_steps)
 
 
+# Fused ReLU-squared MLP tiles, largest first: (BLOCK_SIZE_M, BLOCK_SIZE_N, num_stages).
+# The first entry is the original H100 autotuning and is selected on any device with
+# room for it, so the record path is unchanged.
+MLP_BLOCK_CANDIDATES = (
+    (128, 256, 4),
+    (128, 256, 3),
+    (128, 128, 3),
+    (128, 128, 2),
+    (64, 128, 2),
+)
+# Triton's own accounting includes a little fixed overhead beyond the tiles (24 bytes
+# in the measured case), and occupancy suffers at the very edge, so leave a margin.
+MLP_SHARED_MEMORY_MARGIN = 0.95
+
+
+def mlp_shared_memory_bytes(
+    block_m: int, block_n: int, block_k: int, num_stages: int, use_fp8: bool
+) -> int:
+    """Shared memory the fused MLP kernel needs for one block.
+
+    Triton pipelines num_stages - 1 input buffers and holds one output tile. Validated
+    against the measured failure on an RTX 5090: the original (128, 256, 64, 4) bf16
+    configuration reports 180,248 B, and this returns 180,224 -- the 24-byte remainder
+    is Triton's fixed overhead, covered by MLP_SHARED_MEMORY_MARGIN.
+    """
+    element = 1 if use_fp8 else 2
+    stage_bytes = (block_m * block_k + block_n * block_k) * element
+    output_bytes = block_m * (block_n // 2) * 2  # the output tile stays bf16
+    return max(num_stages - 1, 1) * stage_bytes + output_bytes
+
+
+def select_mlp_block_config(
+    shared_memory_limit: int, use_fp8: bool
+) -> tuple[int, int, int, int]:
+    """Largest candidate tiles that fit the device, as (BM, BN, BK, max_num_stages).
+
+    Selection compares against the device's own opt-in limit rather than a device name
+    or a hand-picked cutoff. An A100 (163,840 B) sits between the H100 configuration's
+    181 KB requirement and a 160 KiB threshold, so a threshold would misclassify it.
+    """
+    block_k = 128 if use_fp8 else 64
+    budget = shared_memory_limit * MLP_SHARED_MEMORY_MARGIN
+    for block_m, block_n, num_stages in MLP_BLOCK_CANDIDATES:
+        if mlp_shared_memory_bytes(block_m, block_n, block_k, num_stages, use_fp8) <= budget:
+            return block_m, block_n, block_k, num_stages
+    raise RuntimeError(
+        f"no fused MLP tile configuration fits {shared_memory_limit} B of shared memory"
+    )
+
+
 def validation_batch_size(portable: bool) -> int:
     return PORTABLE_VAL_BATCH_SIZE if portable else NATIVE_VAL_BATCH_SIZE
 

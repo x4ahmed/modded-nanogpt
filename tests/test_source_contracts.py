@@ -330,22 +330,17 @@ class CeSharedMemoryContractTests(unittest.TestCase):
             "CE kernel cannot fit SM120's per-block opt-in limit",
         )
 
-    def test_fused_mlp_keeps_the_h100_tiles_and_shrinks_only_below_them(self):
+    def test_fused_mlp_tiles_are_chosen_from_the_measured_device_limit(self):
         chooser = function_def(TRITON_TREE, "_mlp_block_config")
         rendered = ast.unparse(chooser)
-        # The record path must be bit-for-bit the original H100 configuration.
-        self.assertIn("(128, 256, block_k, 4)", rendered)
-        # ... and the smaller tiles must be gated on the device's own limit, not on
-        # PORTABLE or any hardcoded device name.
-        self.assertIn("_device_shared_memory_limit(device)", rendered)
-        self.assertIn("_H100_CLASS_SHARED_MEMORY", rendered)
+        # Selection must come from the device's own limit compared against the
+        # configuration's computed requirement -- never a hardcoded cutoff, a device
+        # name, or PORTABLE. A fixed threshold misclassifies the A100.
+        self.assertIn("select_mlp_block_config(_device_shared_memory_limit(device)", rendered)
         self.assertNotIn("PORTABLE", rendered)
-
-        self.assertIn("(128, 128, block_k, 2)", rendered)
-
-        # 2 stages x (128x64 + 128x64) x 2 bytes + a 128x64 bf16 output tile.
-        estimate = 2 * (128 * 64 + 128 * 64) * 2 + 128 * 64 * 2
-        self.assertLess(estimate, SM120_SHARED_MEMORY_OPTIN_LIMIT)
+        self.assertNotIn("_H100_CLASS_SHARED_MEMORY", ast.unparse(TRITON_TREE))
+        for banned in ("5090", "sm_120", "H100", "A100"):
+            self.assertNotIn(banned, rendered)
 
     def test_launch_caps_pipeline_depth_to_the_chosen_config(self):
         launcher = function_def(TRITON_TREE, "linear_relu_square")

@@ -84,6 +84,64 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertFalse(config.portable)
 
 
+class MlpBlockConfigTests(unittest.TestCase):
+    # Real values of shared_memory_per_block_optin, in bytes.
+    H100 = 232_448
+    A100 = 163_840
+    SM120 = 101_376
+    VOLTA = 98_304
+    TURING = 65_536
+
+    def test_estimator_reproduces_the_measured_failure(self):
+        from portable_runtime import mlp_shared_memory_bytes
+
+        # The original H100 tiles reported Required: 180248 on an RTX 5090. The
+        # 24-byte remainder is Triton's fixed overhead.
+        self.assertEqual(mlp_shared_memory_bytes(128, 256, 64, 4, False), 180_224)
+
+    def test_h100_class_devices_keep_the_original_tiles(self):
+        from portable_runtime import select_mlp_block_config
+
+        for use_fp8 in (False, True):
+            with self.subTest(use_fp8=use_fp8):
+                block_m, block_n, block_k, stages = select_mlp_block_config(self.H100, use_fp8)
+                self.assertEqual((block_m, block_n, stages), (128, 256, 4))
+                self.assertEqual(block_k, 128 if use_fp8 else 64)
+
+    def test_a100_is_not_misclassified_as_h100(self):
+        from portable_runtime import mlp_shared_memory_bytes, select_mlp_block_config
+
+        # An A100's limit is 163,840 B: below the original configuration's 180,224 B
+        # but above a naive "160 KiB means large" cutoff, so a threshold would hand it
+        # a configuration that cannot compile.
+        self.assertLess(self.A100, mlp_shared_memory_bytes(128, 256, 64, 4, False))
+        block_m, block_n, block_k, stages = select_mlp_block_config(self.A100, False)
+        self.assertNotEqual((block_m, block_n, stages), (128, 256, 4))
+        self.assertLessEqual(
+            mlp_shared_memory_bytes(block_m, block_n, block_k, stages, False), self.A100
+        )
+
+    def test_every_real_device_gets_a_configuration_that_fits(self):
+        from portable_runtime import (
+            MLP_SHARED_MEMORY_MARGIN,
+            mlp_shared_memory_bytes,
+            select_mlp_block_config,
+        )
+
+        for limit in (self.H100, self.A100, self.SM120, self.VOLTA, self.TURING):
+            for use_fp8 in (False, True):
+                with self.subTest(limit=limit, use_fp8=use_fp8):
+                    config = select_mlp_block_config(limit, use_fp8)
+                    need = mlp_shared_memory_bytes(*config, use_fp8)
+                    self.assertLessEqual(need, limit * MLP_SHARED_MEMORY_MARGIN)
+
+    def test_impossible_limit_raises_instead_of_silently_shrinking(self):
+        from portable_runtime import select_mlp_block_config
+
+        with self.assertRaises(RuntimeError):
+            select_mlp_block_config(1024, False)
+
+
 class RunPlanTests(unittest.TestCase):
     def test_full_plan_has_1285_updates_and_terminal_validation(self):
         plan = make_run_plan(FULL_SCHEDULE_STEPS, None)
