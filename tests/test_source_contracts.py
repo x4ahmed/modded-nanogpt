@@ -330,6 +330,31 @@ class CeSharedMemoryContractTests(unittest.TestCase):
             "CE kernel cannot fit SM120's per-block opt-in limit",
         )
 
+    def test_fused_mlp_keeps_the_h100_tiles_and_shrinks_only_below_them(self):
+        chooser = function_def(TRITON_TREE, "_mlp_block_config")
+        rendered = ast.unparse(chooser)
+        # The record path must be bit-for-bit the original H100 configuration.
+        self.assertIn("(128, 256, block_k, 4)", rendered)
+        # ... and the smaller tiles must be gated on the device's own limit, not on
+        # PORTABLE or any hardcoded device name.
+        self.assertIn("_device_shared_memory_limit(device)", rendered)
+        self.assertIn("_H100_CLASS_SHARED_MEMORY", rendered)
+        self.assertNotIn("PORTABLE", rendered)
+
+        self.assertIn("(128, 128, block_k, 2)", rendered)
+
+        # 2 stages x (128x64 + 128x64) x 2 bytes + a 128x64 bf16 output tile.
+        estimate = 2 * (128 * 64 + 128 * 64) * 2 + 128 * 64 * 2
+        self.assertLess(estimate, SM120_SHARED_MEMORY_OPTIN_LIMIT)
+
+    def test_launch_caps_pipeline_depth_to_the_chosen_config(self):
+        launcher = function_def(TRITON_TREE, "linear_relu_square")
+        rendered = ast.unparse(launcher)
+        # num_stages must never exceed what the device config allows.
+        self.assertIn("min(4 if FORWARD else 3, MAX_STAGES)", rendered)
+        self.assertIn("min(3, MAX_STAGES)", rendered)
+        self.assertNotIn("num_stages = 4 if FORWARD else 3", rendered)
+
     def test_compute_target_is_unchanged_pending_device_evidence(self):
         self.assertEqual(
             ast.literal_eval(module_assignment(TRITON_TREE, "CE_KERNEL_COMPUTE_CAPABILITY")), "90"

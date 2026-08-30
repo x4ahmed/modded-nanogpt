@@ -575,6 +575,43 @@ def _get_dummy_f32(device):
         _dummy_f32 = torch.zeros(1, dtype=torch.float32, device=device)
     return _dummy_f32
 
+# The fused MLP tiles below were autotuned for H100 (sm_90), which offers 227 KB of
+# opt-in shared memory per block. That configuration requests 180,248 B:
+#   3 pipelined stages x (BM 128 x BK 64 + BN 256 x BK 64) x 2 bytes, plus a
+#   128 x 128 bf16 output tile = 180,224, plus 24 bytes of overhead.
+# SM120 (RTX 5090) offers 101,376 B, so Triton finds no valid config and compilation
+# fails with "No valid triton configs. OutOfResources: out of resource: shared memory,
+# Required: 180248, Hardware limit: 101376". Measured on an RTX 5090, 2026-08-30.
+#
+# Tiles and pipeline depth change only how the kernel iterates; the arithmetic and the
+# output are identical. Devices with H100-class shared memory keep the original
+# configuration exactly, so the record path is untouched.
+_H100_CLASS_SHARED_MEMORY = 160 * 1024
+_MLP_BLOCK_CONFIG_CACHE: dict[tuple[int, bool], tuple[int, int, int, int]] = {}
+
+
+def _device_shared_memory_limit(device) -> int:
+    props = torch.cuda.get_device_properties(device)
+    return getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block)
+
+
+def _mlp_block_config(device, use_fp8: bool) -> tuple[int, int, int, int]:
+    """Return (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, max_num_stages)."""
+    index = torch.cuda.current_device() if device is None else torch.device(device).index
+    key = (index, use_fp8)
+    cached = _MLP_BLOCK_CONFIG_CACHE.get(key)
+    if cached is None:
+        block_k = 128 if use_fp8 else 64
+        if _device_shared_memory_limit(device) >= _H100_CLASS_SHARED_MEMORY:
+            cached = (128, 256, block_k, 4)
+        else:
+            # 2 stages x (128x64 + 128x64) x 2 bytes + a 128x64 bf16 output tile
+            # = 81,920 B, comfortably inside SM120's 101,376 B.
+            cached = (128, 128, block_k, 2)
+        _MLP_BLOCK_CONFIG_CACHE[key] = cached
+    return cached
+
+
 def linear_relu_square(
     a,
     b,
@@ -595,9 +632,7 @@ def linear_relu_square(
 
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
-    BLOCK_SIZE_M = 128
-    BLOCK_SIZE_N = 256
-    BLOCK_SIZE_K = 128 if use_fp8 else 64
+    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, MAX_STAGES = _mlp_block_config(a.device, use_fp8)
 
     FORWARD = False
     if aux is None:
@@ -608,7 +643,7 @@ def linear_relu_square(
         # forward kernel's memory analysis / pipelining).
         aux = torch.empty((BLOCK_SIZE_M, BLOCK_SIZE_N // 2), device=a.device, dtype=dtype)
 
-    num_stages = 4 if FORWARD else 3
+    num_stages = min(4 if FORWARD else 3, MAX_STAGES)
     num_warps = 8
 
     a_kernel = a_f8 if use_fp8 else a
@@ -625,7 +660,7 @@ def linear_relu_square(
         post_fp8_desc = TensorDescriptor.from_tensor(
             post_fp8, [BLOCK_SIZE_M, BLOCK_SIZE_N // 2]
         )
-        num_stages = 3
+        num_stages = min(3, MAX_STAGES)
     else:
         post_fp8 = None
         post_fp8_desc = aux_desc
