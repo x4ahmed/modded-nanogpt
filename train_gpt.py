@@ -751,6 +751,7 @@ class NorMuonAndAdam:
             "param_cfgs": {id(p): s for p, s in self.param_cfgs.items()},
         }
 
+    @torch.no_grad()
     def load_state_dict(self, state_dict):
         """Load optimizer state from a dict."""
         # Build id->param mapping
@@ -762,11 +763,21 @@ class NorMuonAndAdam:
                 param = id_to_param[param_id]
                 p_state = self.param_states[param]
                 for k, v in saved_p_state.items():
-                    if isinstance(v, torch.Tensor) and k in p_state:
-                        target_dtype = p_state[k].dtype
-                        p_state[k] = v.to(dtype=target_dtype, device=p_state[k].device)
+                    if isinstance(v, torch.Tensor):
+                        target = p_state.get(k)
+                        if not isinstance(target, torch.Tensor):
+                            raise KeyError(f"Missing tensor optimizer state {k!r}")
+                        if target.shape != v.shape:
+                            raise ValueError(
+                                f"Optimizer state shape mismatch for {k!r}: "
+                                f"expected {tuple(target.shape)}, got {tuple(v.shape)}"
+                            )
+                        # Copy into the existing device buffer. Assigning v.to(...) here
+                        # briefly retains both the old and new CUDA tensors, which is
+                        # unnecessary during the memory-constrained warmup reset.
+                        target.copy_(v)
                     else:
-                        p_state[k] = v
+                        p_state[k] = copy.deepcopy(v)
 
     # -----------------------------------
     # Unified optimizer step with explicit ordering
@@ -2263,8 +2274,13 @@ class TrainingManager():
             self.send_idxes_buffer = torch.empty(args.bigram_vocab_size, dtype=torch.int32, pin_memory=True)
 
 
-    def get_state(self):
-        return copy.deepcopy(self.optimizer.state_dict())
+    def get_state(self, *, to_cpu=False):
+        state = self.optimizer.state_dict()
+        if to_cpu:
+            # Copy each live tensor straight to host memory. Do not deepcopy first:
+            # that would materialize a complete temporary optimizer copy on CUDA.
+            return cpu_state_copy(state)
+        return copy.deepcopy(state)
 
     def sparse_index_update(self, step, bigram_indexes):
         if not _sparse_comms_active():
@@ -2322,7 +2338,7 @@ def preflight_report(s):
             print(line, file=f)
 
 def cpu_state_copy(state):
-    """Deep-copy a state dict to host memory, leaving CUDA tensors untouched on device.
+    """Deep-copy state to host memory without first duplicating CUDA tensors.
 
     Used for the warmup backup. Tensors are detached and cloned to CPU; everything else
     is deep-copied as usual, so the result is independent of later in-place updates.
@@ -2330,7 +2346,10 @@ def cpu_state_copy(state):
     if isinstance(state, torch.Tensor):
         return state.detach().to("cpu", copy=True)
     if isinstance(state, dict):
-        return {key: cpu_state_copy(value) for key, value in state.items()}
+        rebuilt = type(state)((key, cpu_state_copy(value)) for key, value in state.items())
+        if hasattr(state, "_metadata"):
+            rebuilt._metadata = cpu_state_copy(state._metadata)
+        return rebuilt
     if isinstance(state, (list, tuple)):
         rebuilt = [cpu_state_copy(value) for value in state]
         return type(state)(rebuilt) if not isinstance(state, tuple) else tuple(rebuilt)
@@ -2467,14 +2486,15 @@ if RTX_PREFLIGHT:
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(device)
 # Warmup the training kernels, then re-initialize the state so we aren't cheating.
-# The backup lives on the host: it is a second full copy of parameters and optimizer
-# state, and keeping it in VRAM makes warmup -- not training -- the memory high-water
-# mark, on a card where that difference decides whether the run fits at all. Both
-# restore paths already move tensors back: TrainingManager.load_state_dict does
-# v.to(device=p_state[k].device), and model.load_state_dict copies into live GPU
-# params. Numerically identical, and the backup is freed before the clock starts.
-initial_state = dict(model=cpu_state_copy(model.state_dict()),
-                     optimizer=cpu_state_copy(training_manager.get_state())) # save the initial state
+# Under PORTABLE, the backup lives on the host: keeping a second full copy of the
+# parameters and optimizer state in VRAM makes warmup -- not training -- the memory
+# high-water mark. The native path keeps its original device-resident snapshot.
+# Both restore paths copy into the existing live buffers, and the backup is freed
+# before the clock starts, so this does not change model math or timed training.
+initial_state = dict(
+    model=cpu_state_copy(model.state_dict()) if PORTABLE else copy.deepcopy(model.state_dict()),
+    optimizer=training_manager.get_state(to_cpu=PORTABLE),
+)  # save the initial state
 report_memory("after_warmup_backup")
 train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].batch_size, TRAINING_STAGES[0].train_max_seq_len, grad_accum_steps=grad_accum_steps)
 val_loader = distributed_data_generator(args.val_files, args.val_batch_size, -1, grad_accum_steps=grad_accum_steps, align_to_bos=False)

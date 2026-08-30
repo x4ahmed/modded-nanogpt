@@ -208,15 +208,35 @@ class PortableGuardTests(unittest.TestCase):
         )
         rendered = ast.unparse(backup)
         # A second full copy of parameters and optimizer state in VRAM makes warmup,
-        # not training, the memory high-water mark. Both restore paths move tensors
-        # back to device, so the backup belongs on the host.
-        self.assertIn("cpu_state_copy(model.state_dict())", rendered)
-        self.assertIn("cpu_state_copy(training_manager.get_state())", rendered)
-        self.assertNotIn("copy.deepcopy(model.state_dict())", rendered)
+        # not training, the memory high-water mark. Keep the native path unchanged.
+        self.assertIn(
+            "cpu_state_copy(model.state_dict()) if PORTABLE else copy.deepcopy(model.state_dict())",
+            rendered,
+        )
+        self.assertIn("training_manager.get_state(to_cpu=PORTABLE)", rendered)
+        self.assertNotIn("cpu_state_copy(training_manager.get_state", rendered)
 
         mover = function_def(TRAIN_TREE, "cpu_state_copy")
         moved = ast.unparse(mover)
         self.assertIn("detach().to('cpu', copy=True)", moved)
+
+        manager = class_def(TRAIN_TREE, "TrainingManager")
+        getter = ast.unparse(function_def(manager, "get_state"))
+        self.assertIn("state = self.optimizer.state_dict()", getter)
+        self.assertIn("return cpu_state_copy(state)", getter)
+        self.assertIn("return copy.deepcopy(state)", getter)
+        self.assertNotIn("cpu_state_copy(copy.deepcopy", getter)
+
+    def test_optimizer_restore_reuses_existing_device_buffers(self):
+        optimizer = class_def(TRAIN_TREE, "NorMuonAndAdam")
+        loader = ast.unparse(function_def(optimizer, "load_state_dict"))
+        self.assertIn("target.copy_(v)", loader)
+        self.assertNotIn("p_state[k] = v.to", loader)
+        self.assertIn("target.shape != v.shape", loader)
+
+        mover = ast.unparse(function_def(TRAIN_TREE, "cpu_state_copy"))
+        self.assertIn("type(state)", mover)
+        self.assertIn("rebuilt._metadata = cpu_state_copy(state._metadata)", mover)
 
     def test_memory_breakdown_marks_cover_the_decisive_points(self):
         marks = [
