@@ -199,6 +199,50 @@ class PortableGuardTests(unittest.TestCase):
         self.assertIn("window_masks", [arg.arg for arg in forward.args.args])
         self.assertIn("normal_short_mask, normal_long_mask, paired_short_mask = window_masks", ast.unparse(portable_body))
 
+    def test_warmup_backup_is_held_on_the_host(self):
+        backup = next(
+            node.value
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Assign)
+            and any(getattr(t, "id", None) == "initial_state" for t in node.targets)
+        )
+        rendered = ast.unparse(backup)
+        # A second full copy of parameters and optimizer state in VRAM makes warmup,
+        # not training, the memory high-water mark. Both restore paths move tensors
+        # back to device, so the backup belongs on the host.
+        self.assertIn("cpu_state_copy(model.state_dict())", rendered)
+        self.assertIn("cpu_state_copy(training_manager.get_state())", rendered)
+        self.assertNotIn("copy.deepcopy(model.state_dict())", rendered)
+
+        mover = function_def(TRAIN_TREE, "cpu_state_copy")
+        moved = ast.unparse(mover)
+        self.assertIn("detach().to('cpu', copy=True)", moved)
+
+    def test_memory_breakdown_marks_cover_the_decisive_points(self):
+        marks = [
+            ast.literal_eval(node.args[0])
+            for node in ast.walk(TRAIN_TREE)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "report_memory"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ]
+        # One peak cannot say whether parameters, optimizer state, activations or the
+        # warmup backup dominate it, and those need opposite fixes.
+        for required in (
+            "after_model_construction",
+            "after_optimizer_construction",
+            "after_warmup_backup",
+            "after_first_training_microbatch",
+        ):
+            self.assertIn(required, marks)
+
+        reporter = function_def(TRAIN_TREE, "report_memory")
+        rendered = ast.unparse(reporter)
+        # Must be inert outside the preflight, and must report the delta.
+        self.assertIn("if not RTX_PREFLIGHT", rendered)
+        self.assertIn("delta_allocated_bytes", rendered)
+
     def test_block_masks_are_built_outside_the_compiled_model(self):
         builder = function_def(TRAIN_TREE, "forward_call_args")
         rendered = ast.unparse(builder)

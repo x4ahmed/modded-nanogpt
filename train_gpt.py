@@ -2321,6 +2321,47 @@ def preflight_report(s):
         with open(logfile, "a") as f:
             print(line, file=f)
 
+def cpu_state_copy(state):
+    """Deep-copy a state dict to host memory, leaving CUDA tensors untouched on device.
+
+    Used for the warmup backup. Tensors are detached and cloned to CPU; everything else
+    is deep-copied as usual, so the result is independent of later in-place updates.
+    """
+    if isinstance(state, torch.Tensor):
+        return state.detach().to("cpu", copy=True)
+    if isinstance(state, dict):
+        return {key: cpu_state_copy(value) for key, value in state.items()}
+    if isinstance(state, (list, tuple)):
+        rebuilt = [cpu_state_copy(value) for value in state]
+        return type(state)(rebuilt) if not isinstance(state, tuple) else tuple(rebuilt)
+    return copy.deepcopy(state)
+
+
+_memory_marks: list[tuple[str, int, int]] = []
+
+
+def report_memory(label):
+    """Log the allocator's view at a named point, and the delta since the previous one.
+
+    The preflight's gate reports one peak, which cannot say whether parameters,
+    optimizer state, activations or the warmup backup dominate it -- and those need
+    opposite fixes. This makes the breakdown explicit.
+    """
+    if not RTX_PREFLIGHT:
+        return
+    torch.cuda.synchronize()
+    allocated = torch.cuda.memory_allocated(device)
+    reserved = torch.cuda.memory_reserved(device)
+    previous = _memory_marks[-1][1] if _memory_marks else 0
+    _memory_marks.append((label, allocated, reserved))
+    free_memory, total_memory = torch.cuda.mem_get_info(device)
+    preflight_report(
+        f"MEMORY_MARK {label} allocated_bytes={allocated} reserved_bytes={reserved} "
+        f"delta_allocated_bytes={allocated - previous} "
+        f"process_bytes={total_memory - free_memory} total_bytes={total_memory}"
+    )
+
+
 def forward_call_args(inputs, cum_seqlens):
     """Schedule config plus, under PORTABLE, eagerly built FlexAttention block masks.
 
@@ -2412,8 +2453,10 @@ for param in model.parameters():
 dist.broadcast(model.bigram_sign_table, 0)  # buffer, not in parameters()
 model.quantize_mlp_fp8(bootstrap_down=True)
 
+report_memory("after_model_construction")
 model: nn.Module = torch.compile(model, dynamic=False, fullgraph=True)
 training_manager = TrainingManager(model)
+report_memory("after_optimizer_construction")
 
 
 ########################################
@@ -2423,9 +2466,16 @@ print0("Compiling model and warming up kernels (~7 minutes on first execution)",
 if RTX_PREFLIGHT:
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(device)
-# Warmup the training kernels, then re-initialize the state so we aren't cheating
-initial_state = dict(model=copy.deepcopy(model.state_dict()),
-                     optimizer=training_manager.get_state()) # save the initial state
+# Warmup the training kernels, then re-initialize the state so we aren't cheating.
+# The backup lives on the host: it is a second full copy of parameters and optimizer
+# state, and keeping it in VRAM makes warmup -- not training -- the memory high-water
+# mark, on a card where that difference decides whether the run fits at all. Both
+# restore paths already move tensors back: TrainingManager.load_state_dict does
+# v.to(device=p_state[k].device), and model.load_state_dict copies into live GPU
+# params. Numerically identical, and the backup is freed before the clock starts.
+initial_state = dict(model=cpu_state_copy(model.state_dict()),
+                     optimizer=cpu_state_copy(training_manager.get_state())) # save the initial state
+report_memory("after_warmup_backup")
 train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].batch_size, TRAINING_STAGES[0].train_max_seq_len, grad_accum_steps=grad_accum_steps)
 val_loader = distributed_data_generator(args.val_files, args.val_batch_size, -1, grad_accum_steps=grad_accum_steps, align_to_bos=False)
 
@@ -2439,6 +2489,8 @@ for step in warmup_steps:
     with torch.no_grad():
         inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
         model(inputs, targets, cum_seqlens, bigram_inputs, *forward_call_args(inputs, cum_seqlens)).mean()
+    if step == warmup_steps[0]:
+        report_memory("after_first_validation_forward")
     model.train()
     for idx in range(grad_accum_steps):
         send_args = training_manager.train_loader_send_args
@@ -2448,8 +2500,12 @@ for step in warmup_steps:
         training_manager.sparse_index_share(step)
         loss.backward()
         del loss
+        if step == warmup_steps[0] and idx == 0:
+            report_memory("after_first_training_microbatch")
     training_manager.step_optimizers(step)
     model.quantize_mlp_fp8(bootstrap_down=True)
+    if step == warmup_steps[0]:
+        report_memory("after_first_optimizer_step")
 
 if RTX_PREFLIGHT:
     from portable_preflight import memory_gate_passes, memory_headroom_bytes
