@@ -25,6 +25,7 @@ from track_1_short.perf.kernels.ngram_embed import ngram_embedding
 from track_1_short.perf.kernels.sampled_cross_entropy import SampledSoftcappedCrossEntropy
 from track_1_short.perf.kernels.value_embed import value_embed_lookup
 from track_1_short.perf.residual_fusion import rms_norm_with_head, scale, scale_add
+from track_1_short.portable import config as portable_config
 from track_1_short.sampled_softmax import SampledLoss
 
 # Layer topology (11 layers). Depth cut from record #360 (ANVIL2): layer 7 is removed whole -- its
@@ -114,6 +115,9 @@ FP8_ATTN_GRAD_SCALE = 1.0 / 448.0
 # Validation computes the loss over slabs of this many rows (record #360), so its [rows, vocab] fp32
 # logits (6.6 GB per slab) stay small next to the rank's 16 GB n-gram shard.
 EVAL_CE_SLAB_ROWS = 32768
+if portable_config.PORTABLE:
+    # One 32 GB GPU: a 32768-row slab's fp32 logits alone would be 6.6 GB.
+    EVAL_CE_SLAB_ROWS = portable_config.EVAL_CE_SLAB_ROWS
 
 # FP8 MLP scales (see perf/kernels/mlp.py), from record #360.
 FP8_MLP_X_SCALE = 2 ** -4      # static: post-RMS-norm rows have max|x| <= sqrt(768) = 27.7 < 448 * 2^-4
@@ -531,7 +535,7 @@ class GPT(nn.Module):
 
     def forward(self, input_seq: Tensor, target_seq: Tensor, seqlens: Tensor, bigram_input_seq: Tensor,
                 schedule_cfg: ForwardScheduleConfig, ngram_sink: Tensor | None = None,
-                value_embed_grad: Tensor | None = None):
+                value_embed_grad: Tensor | None = None, window_masks: tuple | None = None):
         """Per-token loss for one packed varlen batch (B=1, documents separated by `seqlens`).
 
         bigram_input_seq: [2T] int32 slots in `ngram_cache` of each token's bigram (first T) and
@@ -540,6 +544,8 @@ class GPT(nn.Module):
         ngram_sink (training only) is NgramTable.grad_sink: the table rows' gradient lands on it.
         value_embed_grad (training only) is the persistent fp16 buffer value_embeds' gradient accumulates
         into (perf/value_embed_pull.py); value_embeds itself never gets a .grad.
+        window_masks (PORTABLE only) are the FlexAttention BlockMasks (normal short, normal long, paired
+        short) built eagerly by portable/attention.py build_window_masks for this batch and windows.
 
         Layer topology (11 layers, 0-indexed):
           - attention on ATTN_LAYERS (0, 1, 2, 3, 5, 8, 10); short sliding window except layers 3 and 10
@@ -560,6 +566,13 @@ class GPT(nn.Module):
         # sliding-window sizes and key shift: the long windows get the partial key offset
         bm_sizes = [ws_long if i in LONG_WINDOW_LAYERS else ws_short for i in range(self.num_layers)]
         key_offset = [i in LONG_WINDOW_LAYERS for i in range(self.num_layers)]
+        if portable_config.PORTABLE:
+            assert window_masks is not None, "PORTABLE forward needs prebuilt block masks"
+            normal_short, normal_long, paired_short = window_masks
+            block_masks = [normal_long if i in LONG_WINDOW_LAYERS else paired_short if i in PAIRED_HEAD_LAYERS
+                           else normal_short for i in range(self.num_layers)]
+        else:
+            block_masks = [None] * self.num_layers
 
         # FP8 is training-only; validation runs the bf16 path.
         use_fp8 = self.training
@@ -711,6 +724,7 @@ class GPT(nn.Module):
                     train_max_seq_len=train_max_seq_len,
                     # The post-lambda rides the output projection, except on the MUDD layer (mu[9] is per-token).
                     o_gain=post_lambdas_attn[i] if mu is None else None,
+                    block_mask=block_masks[i],
                 )
                 qk_w, v_w, o_w = attn_weights[i]
                 attn_out = self.attn[str(i)](attn_in_normed, attn_args, qk_w, v_w, o_w, qkv_fp8)

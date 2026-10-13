@@ -221,6 +221,20 @@ def quantize_mlp_weights_dual(bank: torch.Tensor, scales: torch.Tensor, partial_
 
 # -----------------------------------------------------------------------------
 # Launcher.
+
+# The record's 128x256 tiles (fp8: 48 KB of operands per pipeline stage) are sized for H100's 227 KB of
+# opt-in shared memory per block. A device with less (RTX 5090 / SM120: 99 KB) gets 128x128 tiles, which
+# changes only how the kernel iterates, never its arithmetic or output; the stage retry below then fits
+# the pipeline depth. No cache: this runs inside the compiled region, where dynamo constant-folds a
+# device-property read but rejects mutating module state (rtx-local-v1 hit exactly that).
+H100_CLASS_SHARED_MEMORY = 200 * 1024
+
+
+def mlp_block_n() -> int:
+    props = torch.cuda.get_device_properties("cuda")
+    limit = getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block)
+    return 256 if limit >= H100_CLASS_SHARED_MEMORY else 128
+
 #
 # num_stages per kernel variant. Emit variants start at 3 stages and step down if one exceeds
 # H100 shared memory. This is the one module-level mutable in the package, and it has to be:
@@ -243,7 +257,7 @@ def linear_relu_square(a, b, aux=None, a_f8=None, b_f8=None, dequant_scale_ptr=N
     NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
     # One tile shape for both passes: the backward measured 0.3824 ms at 128x256, 0.4102 ms transposed.
     BLOCK_SIZE_M = 128
-    BLOCK_SIZE_N = 256
+    BLOCK_SIZE_N = mlp_block_n()
     BLOCK_SIZE_K = 128 if use_fp8 else 64
     num_warps = 8
     # The transposed post only exists for the fp8 dW2, when the bf16 post is dead.
@@ -323,7 +337,7 @@ def prime_stage_cache():
     once on one-tile inputs (shared-memory pressure depends only on the variant, not on M/N/K).
     Call once, before torch.compile traces the model."""
     dev = torch.device("cuda")
-    M, N, K = (128, 256, 128)  # one (BLOCK_M, BLOCK_N) tile, one fp8 K-block
+    M, N, K = (128, 256, 128)  # one (BLOCK_M, BLOCK_N) tile (two at BLOCK_N = 128), one fp8 K-block
     num_sms = torch.cuda.get_device_properties(dev).multi_processor_count
     zeros = lambda fmt, *shape: torch.zeros(*shape, device=dev, dtype=fmt)
     a, b = zeros(torch.bfloat16, M, K), zeros(torch.bfloat16, N, K)

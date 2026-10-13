@@ -11,10 +11,10 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from kernels import get_kernel
 from torch import Tensor, nn
 
 from track_1_short.perf.kernels.qkv_rope import PackedFP8QKV, qk_norm_rope_forward
+from track_1_short.portable.config import PORTABLE
 
 # Record #360's FA3 build, patched to take unequal query/key and value head widths ((64, 128) and
 # (128, 64)). Pinned to the immutable commit of its v1 tag, and the loaded binary is checked against
@@ -27,6 +27,7 @@ FA3_BINARY_SHA256 = "9beee90dbef9c9c221e677dad9f932108b70c46aa35841fc0862281d5b8
 
 def load_flash_attn3():
     """The pinned, checksum-verified patched FA3 kernel's flash_attn_interface."""
+    from kernels import get_kernel
     # The publisher is a personal Hub account, which kernels>=0.16 does not trust by default. Trust
     # comes instead from the pinned commit and the binary checksum below.
     fa3 = get_kernel(FA3_REPO, revision=FA3_REVISION, trust_remote_code=True)
@@ -36,7 +37,15 @@ def load_flash_attn3():
     return fa3.flash_attn_interface
 
 
-flash_attn_interface = load_flash_attn3()
+# The FA3 build is sm_90a only. The single-GPU port (PORTABLE=1, track_1_short/portable/) runs
+# FlexAttention with prebuilt block masks instead and never loads it.
+if PORTABLE:
+    from torch.nn.attention.flex_attention import flex_attention
+
+    from track_1_short.portable.attention import KERNEL_OPTIONS as FLEX_KERNEL_OPTIONS
+    flash_attn_interface = None
+else:
+    flash_attn_interface = load_flash_attn3()
 
 
 class Yarn(nn.Module):
@@ -130,6 +139,8 @@ class AttnArgs:
     # A 0-D gain folded into the output projection with sa_lambdas[1]: the layer's residual post-lambda,
     # so the residual add takes the attention output as is (perf/residual_fusion.py). None = no gain.
     o_gain: torch.Tensor | None = None
+    # PORTABLE only: this layer's FlexAttention BlockMask (portable/attention.py build_window_masks).
+    block_mask: object | None = None
 
 
 class CausalSelfAttention(nn.Module):
@@ -214,10 +225,18 @@ class CausalSelfAttention(nn.Module):
             seqlens = 2 * seqlens
             max_len = 2 * max_len
 
-        # use flash_attn over flex_attn @varunneal. flash_attn_varlen suggested by @YouJiacheng
-        y = flash_attn_interface.flash_attn_varlen_func(q[0], k[0], v[0], cu_seqlens_q=seqlens, cu_seqlens_k=seqlens,
-                                                        max_seqlen_q=max_len, max_seqlen_k=max_len,
-                                                        causal=True, softmax_scale=yarn.attn_scale, window_size=(bm_size, 0))
+        if PORTABLE:
+            # The same document-causal window as FA3's varlen call below, as a prebuilt BlockMask.
+            assert attn_args.block_mask is not None, "PORTABLE attention needs a prebuilt block mask"
+            y = flex_attention(
+                q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+                block_mask=attn_args.block_mask, scale=yarn.attn_scale, kernel_options=FLEX_KERNEL_OPTIONS,
+            ).transpose(1, 2)[0].contiguous()
+        else:
+            # use flash_attn over flex_attn @varunneal. flash_attn_varlen suggested by @YouJiacheng
+            y = flash_attn_interface.flash_attn_varlen_func(q[0], k[0], v[0], cu_seqlens_q=seqlens, cu_seqlens_k=seqlens,
+                                                            max_seqlen_q=max_len, max_seqlen_k=max_len,
+                                                            causal=True, softmax_scale=yarn.attn_scale, window_size=(bm_size, 0))
         y = y.view(B, T, H, self.v_dim)
         # Gated XSA (arXiv:2603.09078) with learnable strength: subtract per-head fraction tanh(α)
         # of y aligned with v̂. Non-paired only (v shape doesn't line up for paired layers).

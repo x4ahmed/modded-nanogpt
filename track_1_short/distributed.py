@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
+from track_1_short.portable import config as portable_config
+
 WORLD_SIZE = 8
 
 
@@ -24,8 +26,12 @@ def setup_distributed() -> DistEnv:
     """Initialize NCCL from torchrun's RANK / WORLD_SIZE / LOCAL_RANK."""
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    # The sampled softmax and the sparse row exchanges assume one microbatch per step on 8 ranks.
-    assert world_size == WORLD_SIZE, f"track 1 runs on exactly {WORLD_SIZE} GPUs, got world_size={world_size}"
+    # The sampled softmax and the sparse row exchanges assume one microbatch per step on 8 ranks. The
+    # single-GPU port (PORTABLE=1, train_gpt_rtx.py) runs one process that plays all 8 in turn.
+    if portable_config.PORTABLE:
+        assert world_size == 1, f"the single-GPU port runs as one process, got world_size={world_size}"
+    else:
+        assert world_size == WORLD_SIZE, f"track 1 runs on exactly {WORLD_SIZE} GPUs, got world_size={world_size}"
     assert torch.cuda.is_available()
     device = torch.device("cuda", int(os.environ["LOCAL_RANK"]))
     torch.cuda.set_device(device)
