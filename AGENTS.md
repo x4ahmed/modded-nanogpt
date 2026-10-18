@@ -43,17 +43,20 @@
 - Validation loss after two updates: 8.883883 (not a convergence/baseline result).
 - Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
 - Seventeen CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
-- Full-length convergence and multi-seed timing variance remain UNVERIFIED.
+- First full pilot completed: seed 999, launch commit 9f0dfb9, 1194/1194 updates.
+- Pilot final validation loss 3.294856; recorded training time 837067 ms (13m57.067s).
+- Pilot warmup 95s (separate); peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
+- Pilot log: logs/7911de55-2adc-4ef7-b53a-a2a5db3e2edb.txt; predates W&B integration.
+- Supplied pilot output has finite logged losses and no canonical-mask fallback warning.
+- Evidence of learning/completion, not proof of upstream parity or multi-seed stability.
 
 ## Open issue and next steps
-- Background canonical-mask worker failed with wait status 9; inline rebuild succeeded.
+- Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
 - canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
 - Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
-- Run one full-length pilot with the explicit tested settings before freezing a baseline.
-- Inspect final loss, finite values, memory, mask warnings, and timing after that run.
-- Resolve/characterize mask timing before comparing candidates; never silently exclude overhead.
-- Then freeze code/settings/seed list and collect 4-5 full runs to measure local variance.
-- No full-run result or established v2 baseline exists yet.
+- Continue tracking mask warnings; never silently exclude mask overhead from timings.
+- Freeze code/settings/seed list and collect 4-5 full runs to measure local variance.
+- One full pilot exists; no statistically established v2 baseline yet.
 
 ## Verification commands
 - GPU diagnostics: python -u tests/diagnose_rtx5090.py
