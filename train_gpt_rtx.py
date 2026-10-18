@@ -203,6 +203,9 @@ def main():
         #   fp8 train, full CE   the #89 loss on the #92 trunk    -> is it the sampled-softmax port?
         probe_loader = MicrobatchLoader(args.train_files, mb_tokens, staging)
         probe_batch = probe_loader.next_step(1, schedule.lookup(0)[0].train_max_seq_len)[0]
+        # TrainingManager.reset() leaves the per-step schedule values unset, so get_forward_args()
+        # needs this first; the warmup loop calls it per step, and step 0 again is a no-op.
+        training_manager.advance_schedule(0)
         cfg = training_manager.get_forward_args()
         probe_masks = build_window_masks(probe_batch.cum_seqlens, mb_tokens, cfg.ws_short, cfg.ws_long)
         forward = lambda loss_cfg, **kw: uncompiled(probe_batch.inputs, probe_batch.targets,
