@@ -196,11 +196,13 @@ def main():
 
     if probe is not None:
         # The first forward on the fresh weights is already nan, so split the forward itself: three
-        # forwards of one microbatch, eager on the uncompiled module so they neither compile new graph
-        # variants nor spend the recompile limit, and no backward, so the weights do not move.
+        # forwards of one microbatch, no backward, so the weights do not move.
         #   bf16 eval            no fp8 anywhere, full-vocab CE  -> is the shared trunk already nan?
         #   fp8 train, sampled   the real path, the one known to be nan
         #   fp8 train, full CE   the #89 loss on the #92 trunk    -> is it the sampled-softmax port?
+        # Through the compiled model, which is also the path that goes nan: eager FlexAttention falls
+        # back to math_attention, which materializes the whole [H, T, T] score matrix -- 12 GiB at
+        # 16384 tokens. The extra graph variants cost compile time and nothing else.
         probe_loader = MicrobatchLoader(args.train_files, mb_tokens, staging)
         probe_batch = probe_loader.next_step(1, schedule.lookup(0)[0].train_max_seq_len)[0]
         # TrainingManager.reset() leaves the per-step schedule values unset, so get_forward_args()
@@ -208,17 +210,17 @@ def main():
         training_manager.advance_schedule(0)
         cfg = training_manager.get_forward_args()
         probe_masks = build_window_masks(probe_batch.cum_seqlens, mb_tokens, cfg.ws_short, cfg.ws_long)
-        forward = lambda loss_cfg, **kw: uncompiled(probe_batch.inputs, probe_batch.targets,
-                                                    probe_batch.cum_seqlens, probe_batch.ngram_ids,
-                                                    loss_cfg, window_masks=probe_masks, **kw).mean().item()
+        forward = lambda loss_cfg, **kw: model(probe_batch.inputs, probe_batch.targets,
+                                               probe_batch.cum_seqlens, probe_batch.ngram_ids,
+                                               loss_cfg, window_masks=probe_masks, **kw).mean().item()
         uncompiled.complete_yarn_tables()
-        uncompiled.eval()
+        model.eval()
         with torch.no_grad():
             print0(f"NAN PROBE: bf16 eval forward (no fp8, full-vocab CE): loss {forward(cfg)}", console=True)
         # Grad stays enabled for the training forwards: the fp8 Functions pick their kernel variant by
         # what the backward will need, so under no_grad they would not be the forward that goes nan.
         # Nothing calls backward, so no .grad is ever produced and no weight moves.
-        uncompiled.train()
+        model.train()
         for label, sampled_loss in (
             ("sampled softmax", sampled.prepare(0, probe_batch.targets_cpu, uncompiled.lm_head_f8_col)),
             ("full-vocab fused CE", None),
