@@ -4,7 +4,7 @@ Launch:  bash run_rtx.sh                    (full run: warmup, then the timed ru
          RTX_PREFLIGHT=1 bash run_rtx.sh    (memory preflight: warmup + one validation forward, then exit)
 
 The model, optimizer, schedules and kernels are the record's (track_1_short/). What one GPU changes lives
-in track_1_short/portable/ (see its __init__ and docs/rtx-local-v2.md): each step runs the record's 8
+in track_1_short/portable/ (see its __init__): each step runs the record's 8
 ranks as K sequential microbatches, attention is FlexAttention instead of the Hopper-only FA3 build, the
 n-gram table is whole on the GPU at reduced size, and nothing is captured as a CUDA graph.
 """
@@ -56,7 +56,6 @@ from track_1_short.portable.attention import build_window_masks
 from track_1_short.portable.data import MicrobatchLoader, microbatch_cu_seqlens_rows, validation_batches
 from track_1_short.portable.grads import GradAccumulator
 from track_1_short.portable.memory import MemoryReport, gib
-from track_1_short.portable.nan_probe import ENABLED as NAN_PROBE, NanProbe
 from track_1_short.portable.sampled import PortableSampledSoftmax
 from track_1_short.portable.tables import LocalNgramTable, LocalTables, LocalValueEmbeds
 from track_1_short.schedule import TrainingSchedule
@@ -66,9 +65,6 @@ from track_1_short.training import TrainingManager
 dynamo.config.recompile_limit = 64
 PRINT_EVERY = 25
 PREFLIGHT = os.environ.get("RTX_PREFLIGHT") == "1"
-# RTX_NAN_PROBE's forwards and nothing else: the bisection knobs (portable/config.py FP8_ATTN /
-# FP8_MLP) are read at import, so one combination per process, and the warmup is 80 s of waste.
-PROBE_ONLY = os.environ.get("RTX_PROBE_ONLY") == "1"
 
 
 def to_cpu(obj):
@@ -85,8 +81,7 @@ def to_cpu(obj):
 class Trainer:
     """Everything one training step touches, built once in main()."""
 
-    def __init__(self, model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device,
-                 probe: NanProbe | None = None):
+    def __init__(self, model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device):
         self.model = model
         self.uncompiled = uncompiled
         self.training_manager = training_manager
@@ -95,7 +90,6 @@ class Trainer:
         self.value_embeds = value_embeds
         self.grads = grads
         self.device = device
-        self.probe = probe  # RTX_NAN_PROBE only (portable/nan_probe.py); None in a normal run
 
     def train_step(self, step: int, batches, tables: LocalTables) -> torch.Tensor:
         """One optimizer step over the step's microbatches; returns the summed training loss (device).
@@ -104,7 +98,7 @@ class Trainer:
         do_adam = tm.is_adam_step(step)
         windows = tm.get_forward_args()
         loss_sum = torch.zeros((), dtype=torch.float32, device=self.device)
-        for index, batch in enumerate(batches):
+        for batch in batches:
             tokens = batch.inputs.numel()
             masks = build_window_masks(batch.cum_seqlens, tokens, windows.ws_short, windows.ws_long)
             # After the last fp8 refresh (end of the previous step), so the gathered rows are current.
@@ -113,8 +107,6 @@ class Trainer:
             loss = model(batch.inputs, batch.targets, batch.cum_seqlens, batch.ngram_ids, tm.get_forward_args(sampled_loss),
                          ngram_sink=sink, value_embed_grad=self.value_embeds.grad_accum, window_masks=masks).sum()
             loss.backward()
-            if self.probe is not None:
-                self.probe.after_backward(step, index, loss, sink)  # before collect() drops every .grad
             self.ngram.accumulate_grad(batch.ngram_ids, sink.grad)
             sink.grad = None
             self.grads.collect()
@@ -127,8 +119,6 @@ class Trainer:
         # Adam steps, so only those refresh its fp8 copies.
         self.uncompiled.quantize_attn_fp8()
         self.uncompiled.quantize_mlp_fp8(refresh_lm=do_adam)
-        if self.probe is not None:
-            self.probe.state(f"step {step}, after the optimizer step and the fp8 refresh")
         return loss_sum
 
 
@@ -188,64 +178,11 @@ def main():
     value_embeds = LocalValueEmbeds(uncompiled.value_embeds, optimizer, device)
     grads = GradAccumulator(optimizer.param_cfgs)
     tail_averages = TailAverages(optimizer, 0, value_embed_updates=is_update_step, total_steps=schedule.total_steps)
-    probe = NanProbe(uncompiled, print0) if NAN_PROBE else None
-    if probe is not None:
-        probe.state("construction, before any forward")
-    trainer = Trainer(model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device, probe)
+    trainer = Trainer(model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device)
     memory.mark("after_optimizer_construction")
     memory.component("n-gram table + gradient + Adam state", ngram.nbytes)
     memory.component("fp32 gradient accumulators", grads.nbytes)
     memory.component("value_embeds gradient buffer", value_embeds.grad_accum.nbytes)
-
-    if probe is not None:
-        # The first forward on the fresh weights is already nan, so split the forward itself: three
-        # forwards of one microbatch, no backward, so the weights do not move.
-        #   bf16 eval            no fp8 anywhere, full-vocab CE  -> is the shared trunk already nan?
-        #   fp8 train, sampled   the real path, the one known to be nan
-        #   fp8 train, full CE   the #89 loss on the #92 trunk    -> is it the sampled-softmax port?
-        # Through the compiled model, which is also the path that goes nan: eager FlexAttention falls
-        # back to math_attention, which materializes the whole [H, T, T] score matrix -- 12 GiB at
-        # 16384 tokens. The extra graph variants cost compile time and nothing else.
-        probe_loader = MicrobatchLoader(args.train_files, mb_tokens, staging)
-        probe_batch = probe_loader.next_step(1, schedule.lookup(0)[0].train_max_seq_len)[0]
-        # TrainingManager.reset() leaves the per-step schedule values unset, so get_forward_args()
-        # needs this first; the warmup loop calls it per step, and step 0 again is a no-op.
-        training_manager.advance_schedule(0)
-        cfg = training_manager.get_forward_args()
-        probe_masks = build_window_masks(probe_batch.cum_seqlens, mb_tokens, cfg.ws_short, cfg.ws_long)
-        forward = lambda loss_cfg, **kw: model(probe_batch.inputs, probe_batch.targets,
-                                               probe_batch.cum_seqlens, probe_batch.ngram_ids,
-                                               loss_cfg, window_masks=probe_masks, **kw).mean().item()
-        uncompiled.complete_yarn_tables()
-        model.eval()
-        with torch.no_grad():
-            print0(f"NAN PROBE: bf16 eval forward (no fp8, full-vocab CE): loss {forward(cfg)}", console=True)
-        # Grad stays enabled for the training forwards: the fp8 Functions pick their kernel variant by
-        # what the backward will need, so under no_grad they would not be the forward that goes nan.
-        # Nothing calls backward, so no .grad is ever produced and no weight moves.
-        model.train()
-        for label, sampled_loss in (
-            ("sampled softmax", sampled.prepare(0, probe_batch.targets_cpu, uncompiled.lm_head_f8_col)),
-            ("full-vocab fused CE", None),
-        ):
-            loss = forward(training_manager.get_forward_args(sampled_loss),
-                           ngram_sink=ngram.grad_sink(mb_tokens),
-                           value_embed_grad=value_embeds.grad_accum)
-            print0(f"NAN PROBE: train forward ({label}, fp8 attn={rtx.FP8_ATTN} mlp={rtx.FP8_MLP}): "
-                   f"loss {loss}", console=True)
-        # Those forwards atomic-maxed the delayed fp8 amaxes, wrote value_embeds' gradient buffer and
-        # advanced the candidate sweep. Put all three back, so the warmup starts where it would have.
-        value_embeds.reset()
-        sampled.reset()
-        uncompiled.rearm_fp8_bootstrap()
-        uncompiled.quantize_attn_fp8()
-        uncompiled.quantize_mlp_fp8(refresh_lm=True)
-        del probe_loader, probe_batch, probe_masks
-        if PROBE_ONLY:
-            print0("PROBE ONLY: stopping before the warmup", console=True)
-            flush_log()
-            dist.destroy_process_group()
-            sys.exit(0)
 
     ########################################
     #            Warmup kernels            #
@@ -308,8 +245,6 @@ def main():
     uncompiled.quantize_attn_fp8()
     uncompiled.quantize_mlp_fp8(refresh_lm=True)
     model.train()
-    if probe is not None:
-        probe.state("the post-warmup reset")
 
     ########################################
     #        Training and validation       #

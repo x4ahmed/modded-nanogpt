@@ -5,7 +5,7 @@ ranks, a Hopper-only FA3 build, and CUDA graphs of the whole step. This package 
 those pieces when the trainer runs as ONE process (train_gpt_rtx.py). The record's own modules keep
 their code paths; the few places that branch on PORTABLE say so.
 
-What changes, and what it costs (see docs/rtx-local-v2.md for the full list):
+What changes, and what it costs:
   - 8 ranks -> K sequential microbatches of a fixed size per step (config.MICROBATCH_TOKENS). Gradients
     are summed per microbatch, then scaled by 1/VIRTUAL_WORLD (= 8): exactly the record's AVG over 8
     ranks, whatever K is.

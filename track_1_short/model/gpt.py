@@ -574,14 +574,10 @@ class GPT(nn.Module):
         else:
             block_masks = [None] * self.num_layers
 
-        # FP8 is training-only; validation runs the bf16 path. The two halves are separable only to
-        # bisect a NaN (portable/config.py FP8_ATTN / FP8_MLP, forward only -- the bf16 attention
-        # projection has no backward); a real run has both on.
+        # FP8 is training-only; validation runs the bf16 path.
         use_fp8 = self.training
-        use_fp8_attn = use_fp8 and portable_config.FP8_ATTN
-        use_fp8_mlp = use_fp8 and portable_config.FP8_MLP
-        attn_f8_weights = self._attn_fp8_weights() if use_fp8_attn else None
-        mlp_up_f8 = self._mlp_up_f8.unbind(0) if use_fp8_mlp else None
+        attn_f8_weights = self._attn_fp8_weights() if use_fp8 else None
+        mlp_up_f8 = self._mlp_up_f8.unbind(0) if use_fp8 else None
 
         # ---- Unbind parameters (avoid select_backward kernels) ----
         sa_lambdas = self.scalars[: 2 * self.num_layers].view(-1, 2)
@@ -680,13 +676,13 @@ class GPT(nn.Module):
                     else:
                         attn_in_normed = norm(attn_in)
                     attn_x_f8 = None
-                    if use_fp8_attn:
+                    if use_fp8:
                         attn_x_f8 = quantize_dual_layout_fused(attn_in_normed.detach().view(-1, attn_in_normed.size(-1)),
                                                                self._attn_x_scale, fmt=torch.float8_e4m3fn)
                     if 7 in cache:
                         late_attn_in = (attn_in_normed, attn_x_f8)
                 qkv_fp8 = None
-                if use_fp8_attn:
+                if use_fp8:
                     qkv_fp8 = (*attn_f8_weights[i], self._attn_x_scale, self._attn_grad_scale, *attn_x_f8)
                 B, T = attn_in_normed.size(0), attn_in_normed.size(1)
 
@@ -749,8 +745,8 @@ class GPT(nn.Module):
             mlp_in = norm(x)
             # fp8 only: the post-lambda is folded into the down-projection scale, so the MLP output
             # already carries it. Not on the MUDD layer, whose post-lambda mu[13] is per-token.
-            fold_p = post_lambdas_mlp[i] if use_fp8_mlp and mu is None else None
-            if use_fp8_mlp:
+            fold_p = post_lambdas_mlp[i] if use_fp8 and mu is None else None
+            if use_fp8:
                 # One quantize of the input, shared with the parallel MLP.
                 x_f8 = quantize_dual_layout_fused(mlp_in.detach().view(-1, mlp_in.size(-1)), self._mlp_x_scale, fmt=torch.float8_e4m3fn)
                 fp8_args = self._mlp_fp8_args(i, mlp_up_f8[i], x_f8, fold_p)
@@ -766,7 +762,7 @@ class GPT(nn.Module):
             if i == PARALLEL_MLP_LAYER:
                 # Same input and the same post-lambda as the layer's own MLP.
                 k = PARALLEL_MLP_SLOT
-                parallel_args = self._mlp_fp8_args(k, mlp_up_f8[k], x_f8, fold_p) if use_fp8_mlp else None
+                parallel_args = self._mlp_fp8_args(k, mlp_up_f8[k], x_f8, fold_p) if use_fp8 else None
                 parallel_out = self._mlp(mlp_in, mlp_fcs[k], mlp_projs[k], parallel_args)
                 x = x + (parallel_out if fold_p is not None else scale(post_lambdas_mlp[i], parallel_out))
 

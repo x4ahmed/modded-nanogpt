@@ -34,13 +34,3 @@ assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM
 assert VAL_SEQ_LEN % 128 == 0, "validation forwards are whole attention blocks"
 assert EVAL_CE_SLAB_ROWS > 0 and WARMUP_MICROBATCHES >= 1
 assert MAX_STEPS is None or MAX_STEPS >= 1
-
-# NaN bisection only (RTX_NAN_PROBE, portable/nan_probe.py): drop fp8 from one half of the training
-# forward and keep it in the other, to tell an fp8 attention projection NaN from an fp8 MLP one. The
-# bf16 halves they fall back to are the validation path, which has no backward, so these are legal in
-# a forward-only probe and nowhere else. A real run leaves both on.
-FP8_ATTN = os.environ.get("RTX_NO_FP8_ATTN") != "1"
-FP8_MLP = os.environ.get("RTX_NO_FP8_MLP") != "1"
-# Caveat: FP8_MLP=False needs no_grad. The bf16 MLP is the validation path and AOTAutograd cannot build
-# a backward for it (FusedLinearReLUSquareFunction.backward indexes the fp8 saved-tensor list), so it
-# raises under a grad-enabled forward. FP8_ATTN=False has no such limit.
