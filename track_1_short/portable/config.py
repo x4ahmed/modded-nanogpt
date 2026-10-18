@@ -41,3 +41,6 @@ assert MAX_STEPS is None or MAX_STEPS >= 1
 # a forward-only probe and nowhere else. A real run leaves both on.
 FP8_ATTN = os.environ.get("RTX_NO_FP8_ATTN") != "1"
 FP8_MLP = os.environ.get("RTX_NO_FP8_MLP") != "1"
+# Caveat: FP8_MLP=False needs no_grad. The bf16 MLP is the validation path and AOTAutograd cannot build
+# a backward for it (FusedLinearReLUSquareFunction.backward indexes the fp8 saved-tensor list), so it
+# raises under a grad-enabled forward. FP8_ATTN=False has no such limit.
