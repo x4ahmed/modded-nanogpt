@@ -3,6 +3,8 @@
 Training stays unchanged: no W&B import, background process or network upload.
 The launcher now calls the uploader automatically after successful training exits,
 targeting `i-learn/speedrun`. It captures `logs/run-<timestamp>-<pid>.console.txt`.
+Run names are `baseline-1gpu-seed-999`, etc., from `TRAIN_SEED` (`unseeded` if unset).
+Repeated seeds can share a display name; distinct log files still have distinct run IDs.
 It uses `~/venvs/wandb-upload/bin/python`; override with `WANDB_UPLOAD_PYTHON`.
 Preflight and failed training runs are not uploaded. `RTX_WANDB_UPLOAD=0` disables
 automatic uploads. Successful truncated runs are uploaded as `full_schedule=false`.

@@ -46,6 +46,19 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertIsNone(args)
 
+    def test_names_follow_each_baseline_seed(self):
+        for seed in (999, 1000, 1001, 1002, 1003):
+            with self.subTest(seed=seed):
+                result, args, _ = self.launch(TRAIN_SEED=str(seed))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
+
+    def test_missing_seed_is_not_mislabeled(self):
+        result, args, _ = self.launch(TRAIN_SEED="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--name\nbaseline-1gpu-seed-unseeded\n", args)
+        self.assertNotIn("--seed\n", args)
+
     def test_preflight_and_optout_skip_upload(self):
         for values in ({"RTX_PREFLIGHT": "1"}, {"RTX_WANDB_UPLOAD": "0"}):
             with self.subTest(values=values):
