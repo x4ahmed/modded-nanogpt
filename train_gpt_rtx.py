@@ -66,6 +66,9 @@ from track_1_short.training import TrainingManager
 dynamo.config.recompile_limit = 64
 PRINT_EVERY = 25
 PREFLIGHT = os.environ.get("RTX_PREFLIGHT") == "1"
+# RTX_NAN_PROBE's forwards and nothing else: the bisection knobs (portable/config.py FP8_ATTN /
+# FP8_MLP) are read at import, so one combination per process, and the warmup is 80 s of waste.
+PROBE_ONLY = os.environ.get("RTX_PROBE_ONLY") == "1"
 
 
 def to_cpu(obj):
@@ -228,7 +231,8 @@ def main():
             loss = forward(training_manager.get_forward_args(sampled_loss),
                            ngram_sink=ngram.grad_sink(mb_tokens),
                            value_embed_grad=value_embeds.grad_accum)
-            print0(f"NAN PROBE: fp8 train forward ({label}): loss {loss}", console=True)
+            print0(f"NAN PROBE: train forward ({label}, fp8 attn={rtx.FP8_ATTN} mlp={rtx.FP8_MLP}): "
+                   f"loss {loss}", console=True)
         # Those forwards atomic-maxed the delayed fp8 amaxes, wrote value_embeds' gradient buffer and
         # advanced the candidate sweep. Put all three back, so the warmup starts where it would have.
         value_embeds.reset()
@@ -237,6 +241,11 @@ def main():
         uncompiled.quantize_attn_fp8()
         uncompiled.quantize_mlp_fp8(refresh_lm=True)
         del probe_loader, probe_batch, probe_masks
+        if PROBE_ONLY:
+            print0("PROBE ONLY: stopping before the warmup", console=True)
+            flush_log()
+            dist.destroy_process_group()
+            sys.exit(0)
 
     ########################################
     #            Warmup kernels            #
