@@ -85,11 +85,12 @@ def upload(payload, args, sdk):
                   id="import-" + payload["config"]["source_sha256"][:24], resume="never",
                   job_type="post-training-import", mode="online", settings=settings,
                   config=payload["config"]) as run:
-        run.define_metric("optimizer_step")
-        for pattern in ("train/*", "validation/*", "timing/*"):
-            run.define_metric(pattern, step_metric="optimizer_step")
+        run.define_metric("optimizer_step", hidden=True, summary="none")
+        run.define_metric("train/loss_per_token", step_metric="optimizer_step")
         for row in payload["history"]:
-            run.log(row)
+            if "train/loss_per_token" in row:
+                run.log({"optimizer_step": row["optimizer_step"],
+                         "train/loss_per_token": row["train/loss_per_token"]})
         run.summary.update(payload["summary"])
         url = run.url
     return url

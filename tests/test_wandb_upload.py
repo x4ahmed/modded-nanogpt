@@ -59,11 +59,25 @@ class UploadTests(unittest.TestCase):
         args = SimpleNamespace(project="test", entity=None, name="pilot")
         self.assertEqual(module.upload(payload, args, sdk), run.url)
         self.assertEqual(run.log.call_count, 2)
+        for call in run.log.call_args_list:
+            self.assertEqual(set(call.args[0]), {"optimizer_step", "train/loss_per_token"})
+        run.define_metric.assert_any_call("optimizer_step", hidden=True, summary="none")
+        run.define_metric.assert_any_call("train/loss_per_token", step_metric="optimizer_step")
         run.summary.update.assert_called_once_with(payload["summary"])
         self.assertEqual(sdk.init.call_args.kwargs["resume"], "never")
         self.assertTrue(sdk.Settings.call_args.kwargs["x_disable_stats"])
         self.assertTrue(sdk.Settings.call_args.kwargs["disable_git"])
         run.log_artifact.assert_not_called()
+
+    def test_validation_only_rows_are_not_uploaded_as_curves(self):
+        payload = module.parse_log(LOG)
+        payload["config"]["source_sha256"] = "b" * 64
+        del payload["history"][-1]["train/loss_per_token"]
+        sdk = MagicMock()
+        module.upload(payload, SimpleNamespace(project="test", entity=None, name=None), sdk)
+        run = sdk.init.return_value.__enter__.return_value
+        self.assertEqual(run.log.call_count, 1)
+        run.summary.update.assert_called_once_with(payload["summary"])
 
 
 if __name__ == "__main__":
