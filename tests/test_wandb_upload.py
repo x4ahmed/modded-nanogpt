@@ -60,14 +60,29 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(module.upload(payload, args, sdk), run.url)
         self.assertEqual(run.log.call_count, 2)
         for call in run.log.call_args_list:
-            self.assertEqual(set(call.args[0]), {"optimizer_step", "train/loss_per_token"})
+            point = call.args[0]
+            self.assertEqual(set(point), {"optimizer_step", "training_seconds", "training_minutes",
+                                         "train/loss_per_token", "train/loss_vs_seconds", "train/loss_vs_minutes"})
+            self.assertEqual(point["train/loss_per_token"], point["train/loss_vs_seconds"])
+            self.assertEqual(point["train/loss_per_token"], point["train/loss_vs_minutes"])
+            self.assertAlmostEqual(point["training_minutes"], point["training_seconds"] / 60)
         run.define_metric.assert_any_call("optimizer_step", hidden=True, summary="none")
+        run.define_metric.assert_any_call("training_seconds", hidden=True, summary="none")
+        run.define_metric.assert_any_call("training_minutes", hidden=True, summary="none")
         run.define_metric.assert_any_call("train/loss_per_token", step_metric="optimizer_step")
+        run.define_metric.assert_any_call("train/loss_vs_seconds", step_metric="training_seconds")
+        run.define_metric.assert_any_call("train/loss_vs_minutes", step_metric="training_minutes")
+        self.assertEqual(run.log.call_args_list[-1].args[0]["training_seconds"], 0.938)
         run.summary.update.assert_called_once_with(payload["summary"])
         self.assertEqual(sdk.init.call_args.kwargs["resume"], "never")
         self.assertTrue(sdk.Settings.call_args.kwargs["x_disable_stats"])
         self.assertTrue(sdk.Settings.call_args.kwargs["disable_git"])
         run.log_artifact.assert_not_called()
+
+    def test_train_time_not_overwritten_by_validation(self):
+        result = module.parse_log(LOG)
+        self.assertEqual(result["history"][-1]["train/elapsed_ms"], 938)
+        self.assertEqual(result["summary"]["training_time_ms"], 281930)
 
     def test_validation_only_rows_are_not_uploaded_as_curves(self):
         payload = module.parse_log(LOG)

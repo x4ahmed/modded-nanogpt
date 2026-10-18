@@ -43,11 +43,13 @@ Use either the trainer UUID log or console log, not both. Add `--entity TEAM` if
 needed. Optional `--training-commit HASH` must be the commit used for training;
 the uploader deliberately does not use the current Git checkout or environment.
 
-Uploads one curve: training loss versus optimizer step at existing logging intervals.
-The optimizer-step metric is hidden from automatic standalone plots.
+Uploads three curves: training loss versus optimizer step, elapsed training seconds,
+and elapsed training minutes, at existing logging intervals. Axis metrics are hidden
+from automatic standalone plots. Time comes from each training-loss log line, not
+the upload clock or a later validation line at the same optimizer step.
 Final validation loss, recorded total training time, peak memory and warning flags
 remain in the run summary. Configuration comes from the runtime header.
-Timing and validation histories are not uploaded; local logs remain unchanged.
+No separate timing or validation curves are uploaded; local logs remain unchanged.
 Existing workspace panels from earlier uploads are not removed automatically.
 No raw logs, source snapshots or checkpoints
 are attached. Uploader system metrics/code/Git collection are disabled. W&B's

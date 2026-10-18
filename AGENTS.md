@@ -42,7 +42,7 @@
 - tests/check_rtx5090.py passed all sampled warmup stages, two full updates, and validation.
 - Validation loss after two updates: 8.883883 (not a convergence/baseline result).
 - Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
-- Eighteen CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
+- Nineteen CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
 - First full pilot completed: seed 999, launch commit 9f0dfb9, 1194/1194 updates.
 - Pilot final validation loss 3.294856; recorded training time 837067 ms (13m57.067s).
 - Pilot warmup 95s (separate); peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
@@ -74,7 +74,8 @@
 - Compare recorded training_time_ms, not W&B uploader runtime. Do not infer training commit/seed.
 - Upload one log per run; stable content-based IDs refuse duplicate online imports.
 - User screenshot confirms W&B upload succeeded. Uploader venv required pip installation via training pip --python.
-- Future uploads plot only train/loss_per_token vs optimizer_step (axis hidden as standalone plot).
+- Future uploads plot training loss vs optimizer step, training seconds and minutes; axis-only plots hidden.
+- Loss/time uses each training-loss line's timestamp, not later validation/finalization at the same step.
 - Final loss, total time and memory remain summary metrics; old workspace panels need manual hiding.
 - run_rtx.sh auto-uploads to i-learn/speedrun only after successful non-preflight runs.
 - Uses ~/venvs/wandb-upload/bin/python (override WANDB_UPLOAD_PYTHON); RTX_WANDB_UPLOAD=0 opts out.

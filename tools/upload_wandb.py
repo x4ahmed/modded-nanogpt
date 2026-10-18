@@ -57,6 +57,10 @@ def parse_log(text):
                 raise ValueError("Duplicate metric: possible concatenated runs.")
             row.update({key: number(loss), "timing/training_ms": number(elapsed),
                         "timing/step_average_ms": number(average)})
+            if metric == "train_loss_per_token":
+                # Validation at the same step may include extra finalization time.
+                # Preserve the timestamp belonging to this training-loss observation.
+                row["train/elapsed_ms"] = number(elapsed)
         match = FINAL.fullmatch(line)
         if match:
             finals.append(match.groups())
@@ -86,11 +90,19 @@ def upload(payload, args, sdk):
                   job_type="post-training-import", mode="online", settings=settings,
                   config=payload["config"]) as run:
         run.define_metric("optimizer_step", hidden=True, summary="none")
+        run.define_metric("training_seconds", hidden=True, summary="none")
+        run.define_metric("training_minutes", hidden=True, summary="none")
         run.define_metric("train/loss_per_token", step_metric="optimizer_step")
+        run.define_metric("train/loss_vs_seconds", step_metric="training_seconds")
+        run.define_metric("train/loss_vs_minutes", step_metric="training_minutes")
         for row in payload["history"]:
             if "train/loss_per_token" in row:
+                loss = row["train/loss_per_token"]
+                seconds = row["train/elapsed_ms"] / 1000
                 run.log({"optimizer_step": row["optimizer_step"],
-                         "train/loss_per_token": row["train/loss_per_token"]})
+                         "training_seconds": seconds, "training_minutes": seconds / 60,
+                         "train/loss_per_token": loss,
+                         "train/loss_vs_seconds": loss, "train/loss_vs_minutes": loss})
         run.summary.update(payload["summary"])
         url = run.url
     return url
