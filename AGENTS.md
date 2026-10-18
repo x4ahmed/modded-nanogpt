@@ -30,7 +30,7 @@
 - Keep validation packing fixed across local comparisons; do not claim upstream metric parity.
 - Full default schedule: 1194 optimizer updates. Remove RTX_MAX_STEPS for full runs.
 - Leave NUM_SCHEDULED_ITERATIONS unset; short tests truncate, never rescale the schedule.
-- Use TRAIN_SEED=999 for the first full run. Additional baseline seeds not yet frozen here.
+- Notion's existing seed plan is 999, 1000, 1001, 1002, 1003; 999 complete, four pending.
 - Training log is logs/<generated UUID>.txt; capture console separately for warnings.
 
 ## Last verified state (2026-10-18)
@@ -55,8 +55,10 @@
 - canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
 - Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
 - Continue tracking mask warnings; never silently exclude mask overhead from timings.
-- Freeze code/settings/seed list and collect 4-5 full runs to measure local variance.
+- Keep training code/settings fixed; finish seeds 1000-1003. Report mean and sample SD (n-1).
 - One full pilot exists; no statistically established v2 baseline yet.
+- Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
+- Progress seed-results table: https://www.notion.so/3cb0b758a24e81faa372fac85828c1a0 (1/5 complete).
 
 ## Verification commands
 - GPU diagnostics: python -u tests/diagnose_rtx5090.py
