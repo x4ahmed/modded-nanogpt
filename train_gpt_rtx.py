@@ -56,6 +56,7 @@ from track_1_short.portable.attention import build_window_masks
 from track_1_short.portable.data import MicrobatchLoader, microbatch_cu_seqlens_rows, validation_batches
 from track_1_short.portable.grads import GradAccumulator
 from track_1_short.portable.memory import MemoryReport, gib
+from track_1_short.portable.nan_probe import ENABLED as NAN_PROBE, NanProbe
 from track_1_short.portable.sampled import PortableSampledSoftmax
 from track_1_short.portable.tables import LocalNgramTable, LocalTables, LocalValueEmbeds
 from track_1_short.schedule import TrainingSchedule
@@ -81,7 +82,8 @@ def to_cpu(obj):
 class Trainer:
     """Everything one training step touches, built once in main()."""
 
-    def __init__(self, model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device):
+    def __init__(self, model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device,
+                 probe: NanProbe | None = None):
         self.model = model
         self.uncompiled = uncompiled
         self.training_manager = training_manager
@@ -90,6 +92,7 @@ class Trainer:
         self.value_embeds = value_embeds
         self.grads = grads
         self.device = device
+        self.probe = probe  # RTX_NAN_PROBE only (portable/nan_probe.py); None in a normal run
 
     def train_step(self, step: int, batches, tables: LocalTables) -> torch.Tensor:
         """One optimizer step over the step's microbatches; returns the summed training loss (device).
@@ -98,7 +101,7 @@ class Trainer:
         do_adam = tm.is_adam_step(step)
         windows = tm.get_forward_args()
         loss_sum = torch.zeros((), dtype=torch.float32, device=self.device)
-        for batch in batches:
+        for index, batch in enumerate(batches):
             tokens = batch.inputs.numel()
             masks = build_window_masks(batch.cum_seqlens, tokens, windows.ws_short, windows.ws_long)
             # After the last fp8 refresh (end of the previous step), so the gathered rows are current.
@@ -107,6 +110,8 @@ class Trainer:
             loss = model(batch.inputs, batch.targets, batch.cum_seqlens, batch.ngram_ids, tm.get_forward_args(sampled_loss),
                          ngram_sink=sink, value_embed_grad=self.value_embeds.grad_accum, window_masks=masks).sum()
             loss.backward()
+            if self.probe is not None:
+                self.probe.after_backward(step, index, loss, sink)  # before collect() drops every .grad
             self.ngram.accumulate_grad(batch.ngram_ids, sink.grad)
             sink.grad = None
             self.grads.collect()
@@ -119,6 +124,8 @@ class Trainer:
         # Adam steps, so only those refresh its fp8 copies.
         self.uncompiled.quantize_attn_fp8()
         self.uncompiled.quantize_mlp_fp8(refresh_lm=do_adam)
+        if self.probe is not None:
+            self.probe.state(f"step {step}, after the optimizer step and the fp8 refresh")
         return loss_sum
 
 
@@ -178,7 +185,10 @@ def main():
     value_embeds = LocalValueEmbeds(uncompiled.value_embeds, optimizer, device)
     grads = GradAccumulator(optimizer.param_cfgs)
     tail_averages = TailAverages(optimizer, 0, value_embed_updates=is_update_step, total_steps=schedule.total_steps)
-    trainer = Trainer(model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device)
+    probe = NanProbe(uncompiled, print0) if NAN_PROBE else None
+    if probe is not None:
+        probe.state("construction, before any forward")
+    trainer = Trainer(model, uncompiled, training_manager, sampled, ngram, value_embeds, grads, device, probe)
     memory.mark("after_optimizer_construction")
     memory.component("n-gram table + gradient + Adam state", ngram.nbytes)
     memory.component("fp32 gradient accumulators", grads.nbytes)
@@ -245,6 +255,8 @@ def main():
     uncompiled.quantize_attn_fp8()
     uncompiled.quantize_mlp_fp8(refresh_lm=True)
     model.train()
+    if probe is not None:
+        probe.state("the post-warmup reset")
 
     ########################################
     #        Training and validation       #
