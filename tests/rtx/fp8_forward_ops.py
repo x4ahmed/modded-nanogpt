@@ -18,6 +18,11 @@ error is fp8 rounding. NaN is the bug.
 
 Run (one GPU, no torchrun, no PORTABLE):  python tests/rtx/fp8_forward_ops.py
 """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # the repo root, however this is invoked
+
 import torch
 
 from track_1_short.perf.kernels.mlp import linear_relu_square, mlp_block_n, prime_stage_cache
