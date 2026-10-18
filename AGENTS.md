@@ -42,7 +42,7 @@
 - tests/check_rtx5090.py passed all sampled warmup stages, two full updates, and validation.
 - Validation loss after two updates: 8.883883 (not a convergence/baseline result).
 - Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
-- Eight CPU runner/store-contract tests passed. Local Windows environment has no test GPU.
+- Thirteen CPU tests passed (runner, stores, uploader); no local test GPU.
 - Full-length convergence and multi-seed timing variance remain UNVERIFIED.
 
 ## Open issue and next steps
@@ -61,3 +61,11 @@
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v
 - Diagnostic cases are isolated; BF16 controls are tests, not production configuration.
 - Keep diagnostic timings separate from uninstrumented full training timings.
+
+## Post-training monitoring
+- tools/upload_wandb.py imports completed logs only; training code/timer unchanged.
+- Setup/API-key guidance: tools/README.md; use a separate uploader venv, no GPU needed.
+- Preview with --dry-run; never upload raw source logs or put API keys in Git/chat.
+- Compare recorded training_time_ms, not W&B uploader runtime. Do not infer training commit/seed.
+- Upload one log per run; stable content-based IDs refuse duplicate online imports.
+- Parser checked against the user's smoke output; live W&B upload awaits user authentication.
