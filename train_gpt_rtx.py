@@ -194,6 +194,45 @@ def main():
     memory.component("fp32 gradient accumulators", grads.nbytes)
     memory.component("value_embeds gradient buffer", value_embeds.grad_accum.nbytes)
 
+    if probe is not None:
+        # The first forward on the fresh weights is already nan, so split the forward itself: three
+        # forwards of one microbatch, eager on the uncompiled module so they neither compile new graph
+        # variants nor spend the recompile limit, and no backward, so the weights do not move.
+        #   bf16 eval            no fp8 anywhere, full-vocab CE  -> is the shared trunk already nan?
+        #   fp8 train, sampled   the real path, the one known to be nan
+        #   fp8 train, full CE   the #89 loss on the #92 trunk    -> is it the sampled-softmax port?
+        probe_loader = MicrobatchLoader(args.train_files, mb_tokens, staging)
+        probe_batch = probe_loader.next_step(1, schedule.lookup(0)[0].train_max_seq_len)[0]
+        cfg = training_manager.get_forward_args()
+        probe_masks = build_window_masks(probe_batch.cum_seqlens, mb_tokens, cfg.ws_short, cfg.ws_long)
+        forward = lambda loss_cfg, **kw: uncompiled(probe_batch.inputs, probe_batch.targets,
+                                                    probe_batch.cum_seqlens, probe_batch.ngram_ids,
+                                                    loss_cfg, window_masks=probe_masks, **kw).mean().item()
+        uncompiled.complete_yarn_tables()
+        uncompiled.eval()
+        with torch.no_grad():
+            print0(f"NAN PROBE: bf16 eval forward (no fp8, full-vocab CE): loss {forward(cfg)}", console=True)
+        # Grad stays enabled for the training forwards: the fp8 Functions pick their kernel variant by
+        # what the backward will need, so under no_grad they would not be the forward that goes nan.
+        # Nothing calls backward, so no .grad is ever produced and no weight moves.
+        uncompiled.train()
+        for label, sampled_loss in (
+            ("sampled softmax", sampled.prepare(0, probe_batch.targets_cpu, uncompiled.lm_head_f8_col)),
+            ("full-vocab fused CE", None),
+        ):
+            loss = forward(training_manager.get_forward_args(sampled_loss),
+                           ngram_sink=ngram.grad_sink(mb_tokens),
+                           value_embed_grad=value_embeds.grad_accum)
+            print0(f"NAN PROBE: fp8 train forward ({label}): loss {loss}", console=True)
+        # Those forwards atomic-maxed the delayed fp8 amaxes, wrote value_embeds' gradient buffer and
+        # advanced the candidate sweep. Put all three back, so the warmup starts where it would have.
+        value_embeds.reset()
+        sampled.reset()
+        uncompiled.rearm_fp8_bootstrap()
+        uncompiled.quantize_attn_fp8()
+        uncompiled.quantize_mlp_fp8(refresh_lm=True)
+        del probe_loader, probe_batch, probe_masks
+
     ########################################
     #            Warmup kernels            #
     ########################################

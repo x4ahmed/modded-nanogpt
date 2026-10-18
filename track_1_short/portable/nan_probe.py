@@ -35,6 +35,8 @@ def _nonfinite(name: str, t: Tensor | None) -> str | None:
     if t is None or t.dtype not in _CHECKED or t.numel() == 0:
         return None
     # amin / amax are reductions, so this allocates nothing, and both NaN and +-inf propagate.
+    # detach(): half of what is scanned is a parameter, and float() on one warns otherwise.
+    t = t.detach()
     lo, hi = float(t.amin()), float(t.amax())
     if math.isfinite(lo) and math.isfinite(hi):
         return None
