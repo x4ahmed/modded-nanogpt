@@ -13,7 +13,7 @@ Leave the terminal connected. Do not run another GPU test at the same time.
 | Case | Question |
 | --- | --- |
 | gemm | Does FP8 matrix multiplication fail for a particular output dtype or fast-accumulation setting? |
-| mlp | Does the fused MLP write correct FP8 activations in both layouts, eagerly and compiled? |
+| mlp | Do repeated forward and independent backward MLP kernels produce finite outputs, matching transposes and sampled reference rows, eagerly and compiled? |
 | ce | Does the CE kernel work on known finite logits at every candidate width? |
 | eval | Is the fresh BF16 evaluation forward finite? |
 | sampled | Does the unmodified compiled training forward/backward work with sampled softmax? |
@@ -40,3 +40,12 @@ Optional: `--case trace` reruns one case; `--tokens 2048` tests a smaller shape;
 `--timeout 3600` allows an hour per case. Start with the default suite.
 
 CPU runner checks: `python -m unittest discover -s tests -p test_rtx_diagnostic_runner.py`.
+
+After diagnostics pass, run `python -u tests/check_rtx5090.py`. This exercises
+all-stage warmup, two optimizer updates, and validation. Do not launch baseline
+training until this check also passes. These tests are not baseline timing runs.
+
+RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
+The FP8 math, scales, shapes and model structure are unchanged. This bypasses
+the suspect descriptor-store epilogue; GPU results must verify the repair.
+CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.

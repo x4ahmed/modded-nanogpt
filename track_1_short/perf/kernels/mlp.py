@@ -38,11 +38,27 @@ WEIGHT_SCALE_HEADROOM = 1.12
 #   EMIT_F8, EMIT_T           e4m3 post, row-major and transposed (fp8 down projection and dW2)
 
 @triton.jit
+def _store_mlp_tile(desc, ptr, value, row, col, rows, cols,
+                    POINTER_STORES: tl.constexpr):
+    # RTX tiles have 64-byte-wide FP8 half-tiles. Avoid the descriptor-store
+    # epilogue for these narrow tiles; keep the GEMM and quantization unchanged.
+    # The same policy must cover forward post and backward dpre, in both layouts.
+    if POINTER_STORES:
+        rr = row + tl.arange(0, value.shape[0])
+        cc = col + tl.arange(0, value.shape[1])
+        tl.store(ptr + rr[:, None] * cols + cc[None, :], value,
+                 (rr[:, None] < rows) & (cc[None, :] < cols))
+    else:
+        desc.store([row, col], value)
+
+
+@triton.jit
 def linear_relu_square_kernel(a_desc, b_desc, c_desc, aux_desc,
                               dequant_scale_ptr,
                               M, N, K,
                               aux_f8_desc, post_scale_ptr, post_amax_ptr, aux_t_desc,
                               c_f8_desc, c_t_desc, dpre_scale_ptr, dpre_amax_ptr, aux_w_desc,
+                              c_ptr, aux_ptr, aux_f8_ptr, aux_t_ptr, c_f8_ptr, c_t_ptr,
                               BLOCK_SIZE_M: tl.constexpr,
                               BLOCK_SIZE_N: tl.constexpr,
                               BLOCK_SIZE_K: tl.constexpr,
@@ -51,6 +67,7 @@ def linear_relu_square_kernel(a_desc, b_desc, c_desc, aux_desc,
                               USE_FP8: tl.constexpr,
                               EMIT_F8: tl.constexpr, EMIT_T: tl.constexpr, STORE_PRE: tl.constexpr,
                               STORE_POST_BF: tl.constexpr,
+                              POINTER_STORES: tl.constexpr,
                               ):
     dtype = tl.bfloat16
     start_pid = tl.program_id(axis=0)
@@ -98,28 +115,28 @@ def linear_relu_square_kernel(a_desc, b_desc, c_desc, aux_desc,
         if FORWARD:
             c0 = acc0.to(dtype)                      # pre (bf16-rounded)
             if STORE_PRE:
-                c_desc.store([offs_am, offs_bn], c0)
+                _store_mlp_tile(c_desc, c_ptr, c0, offs_am, offs_bn, M, N, POINTER_STORES)
             c0_post = tl.maximum(c0, 0)
             c0_post = c0_post * c0_post
             if STORE_POST_BF:
-                aux_desc.store([offs_am, offs_bn], c0_post)
+                _store_mlp_tile(aux_desc, aux_ptr, c0_post, offs_am, offs_bn, M, N, POINTER_STORES)
             if EMIT_F8:
                 q0 = tl.minimum(c0_post.to(tl.float32) * inv_post_scale, 448.0).to(tl.float8e4nv)
-                aux_f8_desc.store([offs_am, offs_bn], q0)
+                _store_mlp_tile(aux_f8_desc, aux_f8_ptr, q0, offs_am, offs_bn, M, N, POINTER_STORES)
                 if EMIT_T:
-                    aux_t_desc.store([offs_bn, offs_am], tl.trans(q0))
+                    _store_mlp_tile(aux_t_desc, aux_t_ptr, tl.trans(q0), offs_bn, offs_am, N, M, POINTER_STORES)
             c1 = acc1.to(dtype)
             if STORE_PRE:
-                c_desc.store([offs_am, offs_bn + BLOCK_SIZE_N // 2], c1)
+                _store_mlp_tile(c_desc, c_ptr, c1, offs_am, offs_bn + BLOCK_SIZE_N // 2, M, N, POINTER_STORES)
             c1_post = tl.maximum(c1, 0)
             c1_post = c1_post * c1_post
             if STORE_POST_BF:
-                aux_desc.store([offs_am, offs_bn + BLOCK_SIZE_N // 2], c1_post)
+                _store_mlp_tile(aux_desc, aux_ptr, c1_post, offs_am, offs_bn + BLOCK_SIZE_N // 2, M, N, POINTER_STORES)
             if EMIT_F8:
                 q1 = tl.minimum(c1_post.to(tl.float32) * inv_post_scale, 448.0).to(tl.float8e4nv)
-                aux_f8_desc.store([offs_am, offs_bn + BLOCK_SIZE_N // 2], q1)
+                _store_mlp_tile(aux_f8_desc, aux_f8_ptr, q1, offs_am, offs_bn + BLOCK_SIZE_N // 2, M, N, POINTER_STORES)
                 if EMIT_T:
-                    aux_t_desc.store([offs_bn + BLOCK_SIZE_N // 2, offs_am], tl.trans(q1))
+                    _store_mlp_tile(aux_t_desc, aux_t_ptr, tl.trans(q1), offs_bn + BLOCK_SIZE_N // 2, offs_am, N, M, POINTER_STORES)
                 # atomic_max, not a loop-carried scalar: tl.range(flatten=True) does not guarantee those.
                 tile_max = tl.max(tl.max(tl.maximum(c0_post.to(tl.float32), c1_post.to(tl.float32)), axis=1), axis=0)
                 tl.atomic_max(post_amax_ptr, tile_max)
@@ -135,10 +152,10 @@ def linear_relu_square_kernel(a_desc, b_desc, c_desc, aux_desc,
             c1f = c1.to(tl.float32)
             q0 = tl.maximum(tl.minimum(c0f * inv_dpre_scale, 57344.0), -57344.0).to(tl.float8e5)
             q1 = tl.maximum(tl.minimum(c1f * inv_dpre_scale, 57344.0), -57344.0).to(tl.float8e5)
-            c_f8_desc.store([offs_am, offs_bn], q0)
-            c_f8_desc.store([offs_am, offs_bn + BLOCK_SIZE_N // 2], q1)
-            c_t_desc.store([offs_bn, offs_am], tl.trans(q0))
-            c_t_desc.store([offs_bn + BLOCK_SIZE_N // 2, offs_am], tl.trans(q1))
+            _store_mlp_tile(c_f8_desc, c_f8_ptr, q0, offs_am, offs_bn, M, N, POINTER_STORES)
+            _store_mlp_tile(c_f8_desc, c_f8_ptr, q1, offs_am, offs_bn + BLOCK_SIZE_N // 2, M, N, POINTER_STORES)
+            _store_mlp_tile(c_t_desc, c_t_ptr, tl.trans(q0), offs_bn, offs_am, N, M, POINTER_STORES)
+            _store_mlp_tile(c_t_desc, c_t_ptr, tl.trans(q1), offs_bn + BLOCK_SIZE_N // 2, offs_am, N, M, POINTER_STORES)
             tile_max = tl.max(tl.max(tl.maximum(tl.abs(c0f), tl.abs(c1f)), axis=1), axis=0)
             tl.atomic_max(dpre_amax_ptr, tile_max)
 
@@ -310,11 +327,18 @@ def linear_relu_square(a, b, aux=None, a_f8=None, b_f8=None, dequant_scale_ptr=N
             a_desc, b_desc, c_desc, aux_desc, dequant_scale_ptr, M, N, K,
             aux_f8_desc, post_scale, post_amax, aux_t_desc,
             c_f8_desc, c_t_desc, dpre_scale, dpre_amax, aux_w_desc,
+            c if c is not None else unused_ptr,
+            aux_out if aux_out is not None else unused_ptr,
+            aux_f8 if aux_f8 is not None else unused_ptr,
+            aux_t if aux_t is not None else unused_ptr,
+            c_f8 if c_f8 is not None else unused_ptr,
+            c_t if c_t is not None else unused_ptr,
             BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
             BLOCK_SIZE_K=BLOCK_SIZE_K, NUM_SMS=NUM_SMS,
             FORWARD=FORWARD, USE_FP8=use_fp8,
             EMIT_F8=aux_f8 is not None, EMIT_T=aux_t is not None,
             STORE_PRE=FORWARD and store_pre, STORE_POST_BF=FORWARD and store_post_bf,
+            POINTER_STORES=BLOCK_SIZE_N == 128,
             num_stages=stages, num_warps=num_warps,
         )
 

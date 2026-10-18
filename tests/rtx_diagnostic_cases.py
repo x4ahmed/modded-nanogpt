@@ -23,8 +23,10 @@ def stats(label, tensor):
         part = part.float()
         bad += int((~torch.isfinite(part)).sum().item())
         if part.numel():
-            low = min(low, part.amin().item())
-            high = max(high, part.amax().item())
+            finite = part[torch.isfinite(part)]
+            if finite.numel():
+                low = min(low, finite.amin().item())
+                high = max(high, finite.amax().item())
     print(f"TENSOR {label} shape={tuple(tensor.shape)} dtype={tensor.dtype} "
           f"min={low:.6g} max={high:.6g} nonfinite={bad}", flush=True)
     if bad:
@@ -113,6 +115,34 @@ def mlp_case(tokens):
             post_scale=post_scale, post_amax=amax, store_pre=False, store_post_bf=False)
         return row, transposed
 
+    def backward(g, w, post, g_f8, b, dequant, post_scale, dpre_scale, amax):
+        return linear_relu_square(
+            g, w, aux=post, a_f8=g_f8, b_f8=b, dequant_scale_ptr=dequant,
+            post_scale=post_scale, dpre_scale=dpre_scale, dpre_amax=amax)
+
+    g = torch.randn_like(x) * 0.1
+    g_scale = torch.tensor([1 / 64], device="cuda")
+    g_f8 = (g.float() / g_scale).clamp(-57344, 57344).to(torch.float8_e5m2)
+    dpre_scale = torch.tensor([1 / 64], device="cuda")
+
+    def check_backward(fn):
+        # Independent finite post input, so a forward failure cannot hide backward faults.
+        post = torch.full((tokens, 2816), 0.5, device="cuda").to(torch.float8_e4m3fn)
+        amax.zero_()
+        row, transposed = fn(g, w, post, g_f8, b, g_scale * w_s, post_scale, dpre_scale, amax)
+        stats("backward dpre row", row)
+        stats("backward dpre transposed", transposed)
+        stats("backward dpre amax", amax)
+        for start in range(0, tokens, 128):
+            if not torch.equal(row[start:start + 128].view(torch.uint8),
+                               transposed[:, start:start + 128].T.view(torch.uint8)):
+                raise RuntimeError(f"Backward transpose mismatch at row {start}")
+        for start in sample_rows(tokens):
+            pre = (g_f8[start:start + 128].float() @ b.float().T) * (g_scale * w_s)
+            ref = (2 * pre * math.sqrt(0.5)).bfloat16().float()
+            ref = (ref / dpre_scale).clamp(-57344, 57344)
+            compare(f"backward dpre rows={start}", row[start:start + 128], ref, 0.2)
+
     failures = []
     for label, fn in (("eager", forward), ("compiled", torch.compile(forward, fullgraph=True))):
         def check():
@@ -121,6 +151,10 @@ def mlp_case(tokens):
             stats(f"{label} MLP post row", row)
             stats(f"{label} MLP post transposed", transposed)
             stats(f"{label} MLP post amax", amax)
+            for start in range(0, tokens, 128):
+                if not torch.equal(row[start:start + 128].view(torch.uint8),
+                                   transposed[:, start:start + 128].T.view(torch.uint8)):
+                    raise RuntimeError(f"Forward transpose mismatch at row {start}")
             for start in sample_rows(tokens):
                 pre = ((a[start:start + 128].float() @ b.float().T) * dequant).bfloat16()
                 ref = pre.clamp_min(0).square().float().clamp(max=448)
@@ -128,6 +162,10 @@ def mlp_case(tokens):
                 compare(f"{label} transpose rows={start}", transposed[:, start:start + 128].T,
                         row[start:start + 128], 0.0)
         attempt(failures, label, check)
+        attempt(failures, label + "/repeat", check)
+    for label, fn in (("backward/eager", backward),
+                      ("backward/compiled", torch.compile(backward, fullgraph=True))):
+        attempt(failures, label, lambda: check_backward(fn))
     finish(failures)
 
 
