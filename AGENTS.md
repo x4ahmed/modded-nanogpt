@@ -42,7 +42,7 @@
 - tests/check_rtx5090.py passed all sampled warmup stages, two full updates, and validation.
 - Validation loss after two updates: 8.883883 (not a convergence/baseline result).
 - Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
-- Thirteen CPU tests passed (runner, stores, uploader); no local test GPU.
+- Seventeen CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
 - Full-length convergence and multi-seed timing variance remain UNVERIFIED.
 
 ## Open issue and next steps
@@ -69,3 +69,6 @@
 - Compare recorded training_time_ms, not W&B uploader runtime. Do not infer training commit/seed.
 - Upload one log per run; stable content-based IDs refuse duplicate online imports.
 - Parser checked against the user's smoke output; live W&B upload awaits user authentication.
+- run_rtx.sh auto-uploads to i-learn/speedrun only after successful non-preflight runs.
+- Uses ~/venvs/wandb-upload/bin/python (override WANDB_UPLOAD_PYTHON); RTX_WANDB_UPLOAD=0 opts out.
+- Launcher saves console log and captures launch commit/seed; upload failure retains local results.

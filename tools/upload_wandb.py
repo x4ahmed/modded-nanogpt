@@ -98,8 +98,8 @@ def upload(payload, args, sdk):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path, help="One completed UUID log or console log.")
-    parser.add_argument("--project", default="speed-run-local")
-    parser.add_argument("--entity", help="W&B user/team owning the project.")
+    parser.add_argument("--project", default="speedrun")
+    parser.add_argument("--entity", default="i-learn", help="W&B user/team owning the project.")
     parser.add_argument("--name", help="Display name, e.g. pilot-1gpu-seed-999.")
     parser.add_argument("--seed", type=int, help="Actual training seed; never inferred from current environment.")
     parser.add_argument("--training-commit", help="Actual training commit, not the uploader's checkout.")

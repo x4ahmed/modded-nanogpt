@@ -1,7 +1,15 @@
 # Post-training W&B upload
 
 Training stays unchanged: no W&B import, background process or network upload.
-Run the uploader only after training exits. It needs no GPU and works on a login
+The launcher now calls the uploader automatically after successful training exits,
+targeting `i-learn/speedrun`. It captures `logs/run-<timestamp>-<pid>.console.txt`.
+It uses `~/venvs/wandb-upload/bin/python`; override with `WANDB_UPLOAD_PYTHON`.
+Preflight and failed training runs are not uploaded. `RTX_WANDB_UPLOAD=0` disables
+automatic uploads. Successful truncated runs are uploaded as `full_schedule=false`.
+Upload failures print a retry command and preserve training success and local logs.
+Uploading prolongs the job/allocation lifetime, but is outside measured training time.
+Direct Python training/checker invocations do not auto-upload; use `bash run_rtx.sh`.
+The uploader needs no GPU and works on a login
 node (if cluster policy permits) or a PC with a copied log and internet access.
 
 One-time setup, preferably in a separate environment so training dependencies stay fixed:
@@ -28,7 +36,7 @@ From the repository, replace the filename with ONE actual completed run log:
 
 ```bash
 python tools/upload_wandb.py logs/ACTUAL_LOG.txt --dry-run
-python tools/upload_wandb.py logs/ACTUAL_LOG.txt --project speed-run-local --name pilot-1gpu-seed-999 --seed 999
+python tools/upload_wandb.py logs/ACTUAL_LOG.txt --name pilot-1gpu-seed-999 --seed 999
 ```
 
 Use either the trainer UUID log or console log, not both. Add `--entity TEAM` if
