@@ -14,7 +14,8 @@
 
 ## Goal and repository
 - Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
-- Branch: rtx-local-v2. Remote: https://github.com/x4ahmed/modded-nanogpt.
+- Frozen local branch: baseline (5be1ba0); active: experiment/attention-residuals, branched from baseline.
+- Publish baseline and experiment/attention-residuals; retain remote rtx-local-v2. Future experiments branch from baseline.
 - Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
 - Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
@@ -30,10 +31,10 @@
 - Keep validation packing fixed across local comparisons; do not claim upstream metric parity.
 - Full default schedule: 1194 optimizer updates. Remove RTX_MAX_STEPS for full runs.
 - Leave NUM_SCHEDULED_ITERATIONS unset; short tests truncate, never rescale the schedule.
-- Notion's existing seed plan is 999, 1000, 1001, 1002, 1003; 999 complete, four pending.
+- Seeds 999, 1000, 1001, 1002, 1003 completed; W&B verified 2026-10-21 (see docs/baseline-five-seeds.md).
 - Training log is logs/<generated UUID>.txt; capture console separately for warnings.
 
-## Last verified state (2026-10-18)
+## Last verified state (2026-10-21)
 - Code commit f466280 fixed the observed fused-MLP NaNs on the user's 5090.
 - Narrow 128-column MLP tiles use masked pointer stores, forward/backward, both layouts.
 - FP8 math/scales and model structure were retained; wide-tile path retains descriptor stores.
@@ -51,14 +52,27 @@
 - Evidence of learning/completion, not proof of upstream parity or multi-seed stability.
 
 ## Open issue and next steps
+- Routing implementation: baseline/static/block_attnres via RTX_ROUTING; see docs/attention-residuals.md.
+- Block mode replaces MUDD residual paths; 17 active sublayers in 6/6/5 blocks, plus embedding source.
+- RTX_ATTNRES_INJECT=1 (default) keeps x0/n-gram injections, layer-6 skip, layer-10 cache[0]/n-gram terms (scalars); 0 drops them.
+- Isolation is partial: resid scaling, shared late attn input removed; layer-10 VE gate and injection lambdas reparameterized.
+- 2026-10-22 review fixes: cached block RMS, one query per site (norm weight folded), layer-4 mix reused,
+  learned layer-10 VE gate (attnres_ve_gate), static deltas own param (mudd_static_deltas). W&B suffix -noinject.
+- Static mode ablates final-layer/post-loop MUDD coefficients only; other gates remain dynamic.
+- No shorter schedule or removed compute blocks yet. New routing needs 5090 smoke + full pilot before five seeds.
+- Run seed 999 first; if promising, complete 1000-1003 unchanged. One run is screening, not evidence of improvement.
+- Run python -u tests/check_rtx5090.py --routing block_attnres --block-size 6 --seed 999 after publication (add --attnres-inject 0 for the other arm).
+- 35 CPU/Bash tests pass locally (2026-10-22, both inject arms, injections, registration); GPU unverified.
 - Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
 - canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
 - Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
 - Continue tracking mask warnings; never silently exclude mask overhead from timings.
-- Keep training code/settings fixed; finish seeds 1000-1003. Report mean and sample SD (n-1).
-- One full pilot exists; no statistically established v2 baseline yet.
+- Five-seed baseline at 5be1ba0: loss 3.2948572 ± 0.00104874; training 861.635 ± 1.608645 s (sample SD).
+- All five completed 1194 updates, memory gate passed, no reported mask fallback; pilots excluded.
+- Compare candidates on the same seeds/settings; session variance is not cross-session variance.
 - Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
-- Progress seed-results table: https://www.notion.so/3cb0b758a24e81faa372fac85828c1a0 (1/5 complete).
+- Notion root and Progress updated/verified 2026-10-21: 5/5 baseline, variance, and upstream gap.
+- Mean loss is 0.0148572 above upstream ≤3.28; no seed meets target. Capacity/eval differences are not isolated.
 
 ## Verification commands
 - GPU diagnostics: python -u tests/diagnose_rtx5090.py

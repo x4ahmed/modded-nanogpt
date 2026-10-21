@@ -152,6 +152,7 @@ def main():
            f"record's), validation {val_seq}-token forwards, MLP tile 128x{mlp_block_n()}, eval CE slab "
            f"{rtx.EVAL_CE_SLAB_ROWS} rows, steps {total_steps}/{schedule.total_steps}"
            f"{' (PREFLIGHT)' if PREFLIGHT else ''}", console=True)
+    print0(f"ROUTING variant={rtx.ROUTING} block_size={rtx.ATTNRES_BLOCK_SIZE} inject={int(rtx.ATTNRES_INJECT)}", console=True)
     flush_log()
 
     ########################################

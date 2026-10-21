@@ -38,6 +38,18 @@ def parse_log(text):
                   val_seq_len=int(val_seq), eval_ce_slab_rows=int(slab),
                   planned_updates=planned, scheduled_updates=scheduled,
                   full_schedule=planned == scheduled)
+    routing = [line for line in lines[start + 1:] if line.startswith("ROUTING ")]
+    config["routing_variant"] = "baseline"  # Historical logs predate the selector.
+    if routing:
+        if len(routing) != 1:
+            raise ValueError("Expected one routing configuration.")
+        match = re.fullmatch(r"ROUTING variant=(baseline|static|block_attnres) block_size=(\d+)(?: inject=([01]))?",
+                             routing[0])
+        if not match or not 1 <= int(match[2]) <= 17:
+            raise ValueError("Invalid routing configuration.")
+        config.update(routing_variant=match[1], attnres_block_size=int(match[2]))
+        if match[3] is not None:  # Logs before the injection switch dropped the injections.
+            config["attnres_inject"] = match[3] == "1"
     history, finals = {}, []
     summary = {"canonical_mask_fallback": False}
     previous = -1

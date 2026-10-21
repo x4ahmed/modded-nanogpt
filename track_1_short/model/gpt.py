@@ -8,6 +8,9 @@ from torch import Tensor, nn
 
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
 from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
+from track_1_short.model.residual_routing import (
+    add_to_partial, append_output, block_mix, source, static_mudd, stream_total,
+)
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
     FusedSoftcappedCrossEntropy,
@@ -193,6 +196,21 @@ class GPT(nn.Module):
         self.init_misc(model_dim, num_layers)
         self.init_mudd(num_layers, model_dim)
         self.init_mudd_gate(model_dim)
+        self.routing = portable_config.ROUTING
+        self.attnres_block_size = portable_config.ATTNRES_BLOCK_SIZE
+        self.attnres_inject = portable_config.ATTNRES_INJECT
+        if self.routing == "block_attnres":
+            # 7 attention + 10 serial MLP sites, plus one final readout.
+            # Zero queries start as uniform depth mixing; no additional RNG draws.
+            self.attnres_queries = nn.Parameter(torch.zeros(18, model_dim, device=device))
+            # Last layer's value-embedding gate, replacing MUDD's per-token mu[6], mu[7]: 2 + linear,
+            # zero-initialized, so it starts at MUDD's initial factor 2 and stays learnable per head.
+            self.attnres_ve_gate = nn.Parameter(torch.zeros(num_heads, 2 * VALUE_EMBED_GATE_CHANNELS, device=device))
+            # Last layer's x0 (cache[0]) / n-gram injection lambdas, MUDD's mu[10], mu[11] at init.
+            self.attnres_last_inject = nn.Parameter(torch.tensor([0.0, 0.05], device=device))
+        if self.routing == "static":
+            # Learned constant per-channel-group deltas for the post-loop mix (dynamic init: zero).
+            self.mudd_static_deltas = nn.Parameter(torch.zeros(LAST_LAYER_MUDD_COEFS, MUDD_GROUPS, device=device))
 
         # Auto-label parameters
         for name, param in self.named_parameters():
@@ -419,12 +437,18 @@ class GPT(nn.Module):
 
     def forward_mudd(self, x, id, num_coef):
         """Returns `num_coef` per-token MUDD coefficients from block `id` (0 or 1)."""
+        if self.routing == "static":
+            return static_mudd(self.mudd_b2[id], self._mudd_scale, x, num_coef).split(1, dim=-1)
         x = F.gelu(F.linear(x, self.mudd_w1[id]))
         x = (F.linear(x, self.mudd_w2[id, :num_coef]) + self.mudd_b2[id, :num_coef]) * self._mudd_scale
         return x.split(1, dim=-1)
 
     def forward_mudd_grouped(self, x, id, num_coef):
         """forward_mudd's coefficients plus (B, T, num_coef, MUDD_GROUPS) per-channel-group deltas."""
+        if self.routing == "static":
+            y = static_mudd(self.mudd_b2[id], self._mudd_scale, x, num_coef)
+            deltas = (self.mudd_static_deltas[:num_coef] * self._mudd_scale).to(x.dtype).view(1, 1, num_coef, MUDD_GROUPS)
+            return y.split(1, dim=-1), deltas
         h = F.gelu(F.linear(x, self.mudd_w1[id]))
         y = (F.linear(h, self.mudd_w2[id, :num_coef]) + self.mudd_b2[id, :num_coef]) * self._mudd_scale
         deltas = torch.einsum("btd,kgd->btkg", h, self.mudd_w2g[:num_coef]) * self._mudd_scale
@@ -639,6 +663,13 @@ class GPT(nn.Module):
         # Initialize residual stream with pre-layer-0 bigram injection
         x = x0.clone()
         x[..., :self.ngram_dim] = x[..., :self.ngram_dim] + x0_bigram * bigram_gates[0]
+        if self.routing == "block_attnres":
+            x = self._forward_attnres(x, x0, x0_bigram, x0_gates, bigram_gates, skip_lambda,
+                                     ve, ve_gates, attn_gates, xsa_alphas,
+                                     sa_lambdas, attn_weights, attn_f8_weights, mlp_up_f8,
+                                     mlp_fcs, mlp_projs, post_lambdas_attn, post_lambdas_mlp,
+                                     seqlens, bm_sizes, key_offset, block_masks, train_max_seq_len)
+            return self._loss(norm(x), input_seq, target_seq, mtp_weights, prefix_weight, schedule_cfg.sampled_loss)
         skip_gate_out = None
         post_skip_gate = None
 
@@ -786,6 +817,101 @@ class GPT(nn.Module):
         x = mixed.flatten(-2)
 
         return self._loss(norm(x), input_seq, target_seq, mtp_weights, prefix_weight, schedule_cfg.sampled_loss)
+
+    def _forward_attnres(self, x, x0, x0_bigram, x0_gates, bigram_gates, skip_lambda,
+                         ve, ve_gates, attn_gates, xsa_alphas,
+                         sa_lambdas, attn_weights, attn_f8_weights, mlp_up_f8,
+                         mlp_fcs, mlp_projs, post_attn, post_mlp,
+                         seqlens, bm_sizes, key_offset, block_masks, train_max_seq_len):
+        """Block AttnRes replaces residual routing, not the attention/MLP operators.
+
+        Always replaced: residual scaling, shared late attention input, the last layer's MUDD
+        residual/value mix and the post-loop MUDD mix. With attnres_inject (default) the gated x0 /
+        n-gram injections and the layer-6 skip are kept, added to the open block like a sublayer
+        output (the skip re-adds the summed stream after layer 3, the baseline's cache[3]); without
+        it they are dropped too. Retained: initial n-gram injection, value embeddings and their gates,
+        head/XSA gates, output gains, FP8 projections, windows, layer topology, layer 8's parallel MLP.
+        """
+        blocks, partial, site = (source(x),), None, 0
+        queries = self.attnres_queries.unbind(0)
+        skip_gate = skip_from = None
+        for i in range(self.num_layers):
+            # The depth mix for `site`, reused until a sublayer or an injection changes the sources.
+            mixed = None
+            if i == POST_GATE_LAYER:
+                mixed = block_mix(blocks, partial, queries[site])
+                gate = self.forward_mudd_gate(mixed, id=1, num_coef=self._mudd_gate_post_num_coef)
+                skip_gate = self.unpack_post_mudd_gate(gate, attn_gates, x0_gates, bigram_gates)
+            if self.attnres_inject and i == 6:
+                partial = add_to_partial(partial, torch.sigmoid(skip_lambda) * skip_gate * skip_from)
+                mixed = None
+            if i in ATTN_LAYERS:
+                h = norm(block_mix(blocks, partial, queries[site]))
+                B, T, _ = h.shape
+                qkv_fp8 = None
+                if self.training:
+                    x_f8 = quantize_dual_layout_fused(h.detach().view(-1, h.size(-1)),
+                                                    self._attn_x_scale, fmt=torch.float8_e4m3fn)
+                    qkv_fp8 = (*attn_f8_weights[i], self._attn_x_scale, self._attn_grad_scale, *x_f8)
+                if ve[i] is not None:
+                    head = h[..., :VALUE_EMBED_GATE_CHANNELS]
+                    gate_in = torch.cat([head, ve[i][None, ..., :VALUE_EMBED_GATE_CHANNELS]], dim=-1)
+                    if i == self.num_layers - 1:
+                        # MUDD's per-token factor (initially 2), now a learned per-head linear gate.
+                        gate = 2 + F.linear(gate_in, self.attnres_ve_gate.type_as(gate_in))
+                    else:
+                        gate = 2 * torch.sigmoid(F.linear(gate_in, ve_gates[i]))
+                    gate = gate.view(B, T, self.num_heads, 1)
+                    aux_v = (gate * ve[i].view(B, T, self.num_heads, self.head_dim)).view(B, T, -1)
+                else:
+                    aux_v = None
+                yarn = self.yarn_wide if i in WIDE_QK_LAYERS else self.yarn_paired_head if i in PAIRED_HEAD_LAYERS else self.yarn
+                args = AttnArgs(sa_lambdas=sa_lambdas[i], seqlens=seqlens, bm_size=bm_sizes[i],
+                                yarn=yarn, key_offset=key_offset[i], aux_v=aux_v,
+                                attn_gate_w=attn_gates[i] if i in ATTN_GATE_LAYERS else None,
+                                xsa_alpha=xsa_alphas[i], train_max_seq_len=train_max_seq_len,
+                                o_gain=post_attn[i], block_mask=block_masks[i])
+                out = self.attn[str(i)](h, args, *attn_weights[i], qkv_fp8)
+                blocks, partial, site = append_output(blocks, partial, out, site, self.attnres_block_size)
+                mixed = None
+            if self.attnres_inject:
+                if i == self.num_layers - 1:
+                    # Baseline: mu[10] * cache[0] + mu[11] * n-gram after the last attention. Here as
+                    # learned per-run scalars at MUDD's initial values (0, 0.05), not per-token.
+                    lam = self.attnres_last_inject.type_as(x)
+                    injection = lam[0] * blocks[0][0] + F.pad(lam[1] * x0_bigram, (0, x.size(-1) - self.ngram_dim)).type_as(x)
+                else:
+                    injection = self._attnres_injection(i, x0, x0_bigram, x0_gates, bigram_gates)
+                if injection is not None:
+                    partial = add_to_partial(partial, injection)
+                    mixed = None
+            if i not in NO_MLP_LAYERS:
+                h = norm(mixed if mixed is not None else block_mix(blocks, partial, queries[site]))
+                # Last layer has no folded scale in the baseline cache: apply its gain explicitly.
+                fold = post_mlp[i] if self.training and i != self.num_layers - 1 else None
+                x_f8 = quantize_dual_layout_fused(h.detach().view(-1, h.size(-1)), self._mlp_x_scale,
+                                                fmt=torch.float8_e4m3fn) if self.training else None
+                fp8 = self._mlp_fp8_args(i, mlp_up_f8[i], x_f8, fold) if self.training else None
+                out = self._mlp(h, mlp_fcs[i], mlp_projs[i], fp8)
+                if i == PARALLEL_MLP_LAYER:
+                    k = PARALLEL_MLP_SLOT
+                    fp8 = self._mlp_fp8_args(k, mlp_up_f8[k], x_f8, fold) if self.training else None
+                    out = out + self._mlp(h, mlp_fcs[k], mlp_projs[k], fp8)
+                if fold is None:
+                    out = scale(post_mlp[i], out)
+                blocks, partial, site = append_output(blocks, partial, out, site, self.attnres_block_size)
+            if self.attnres_inject and i == 3:
+                skip_from = stream_total(blocks, partial)
+        assert site == 17
+        return block_mix(blocks, partial, queries[site])
+
+    def _attnres_injection(self, i, x0, x0_bigram, x0_gates, bigram_gates):
+        """Layer i's gated x0 and n-gram injections as one full-width term (_inject's, without x)."""
+        injection = x0 * x0_gates[i] if i in X0_INJECT_LAYERS else None
+        if i in BIGRAM_INJECT_LAYERS and i != 0:
+            bigram = F.pad(x0_bigram * bigram_gates[i], (0, x0.size(-1) - self.ngram_dim)).type_as(x0)
+            injection = bigram if injection is None else injection + bigram
+        return injection
 
     def _loss(self, x, input_seq, target_seq, mtp_weights, prefix_weight, sampled_loss):
         """Per-token loss from the final normed hidden state.

@@ -43,6 +43,8 @@ def configure(args):
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
                       RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5")
+    os.environ.update(RTX_ROUTING=args.routing, RTX_ATTNRES_BLOCK_SIZE=str(args.block_size),
+                      RTX_ATTNRES_INJECT=str(args.attnres_inject))
 
 
 def run_check(args):
@@ -71,7 +73,7 @@ def run_check(args):
     finally:
         sys.argv[0] = entry_path
 
-    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False}
+    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False, "routing_updated": False}
 
     def finite(label, tensor):
         if tensor is None or not tensor.is_floating_point() or tensor.numel() == 0:
@@ -105,6 +107,11 @@ def run_check(args):
     original_collect = trainer.GradAccumulator.collect
 
     def checked_collect(accumulator):
+        if args.routing == "block_attnres":
+            required = ("attnres_queries", "attnres_ve_gate") + (("attnres_last_inject",) if args.attnres_inject else ())
+            for param in accumulator.params:
+                if getattr(param, "label", "") in required and param.grad is None:
+                    raise RuntimeError(f"Missing routing gradient: {param.label}")
         for i, param in enumerate(accumulator.params):
             finite(f"parameter gradient {i}", param.grad)
         original_collect(accumulator)
@@ -130,6 +137,9 @@ def run_check(args):
     original_step = trainer.Trainer.train_step
 
     def checked_step(instance, step, batches, tables):
+        routing_before = None
+        if args.routing == "block_attnres" and state["reset"] and step % 2 == 1:
+            routing_before = instance.uncompiled.attnres_queries.detach().clone()
         compiled_model = instance.model
         microbatch = 0
 
@@ -160,6 +170,10 @@ def run_check(args):
         finite("n-gram second moment", instance.ngram.exp_avg_sq)
         if state["reset"]:
             state["updates"] += 1
+        if routing_before is not None:
+            if torch.equal(routing_before, instance.uncompiled.attnres_queries.detach()):
+                raise RuntimeError("AttnRes queries did not change on the Adam update")
+            state["routing_updated"] = True
         print(f"CHECK {'TRAIN' if state['reset'] else 'WARMUP'} step={step} microbatches={microbatch} finite=yes")
         return loss
 
@@ -177,12 +191,18 @@ def run_check(args):
     trainer.main()
     if state["updates"] != 2 or state["final_loss"] is None or not state["memory"]:
         raise RuntimeError(f"Incomplete verification: {state}")
+    if args.routing == "block_attnres" and not state["routing_updated"]:
+        raise RuntimeError("Routing optimizer update was not verified")
     print(f"RTX5090_CHECK status=pass updates=2 final_val_loss={state['final_loss']:.6f}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--routing", choices=("baseline", "static", "block_attnres"), default="baseline")
+    parser.add_argument("--block-size", type=int, choices=range(1, 18), default=6)
+    parser.add_argument("--attnres-inject", type=int, choices=(0, 1), default=1,
+                        help="Block mode: keep the x0/n-gram injections and layer-6 skip (1) or drop them (0).")
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")
     args = parser.parse_args()

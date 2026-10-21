@@ -23,6 +23,18 @@ LOG = HEADER + "\n" + "\n".join([
 
 
 class UploadTests(unittest.TestCase):
+    def test_routing_metadata(self):
+        for mode in ("baseline", "static", "block_attnres"):
+            text = LOG.replace(HEADER, HEADER + f"\nROUTING variant={mode} block_size=6")
+            result = module.parse_log(text)
+            self.assertEqual(result["config"]["routing_variant"], mode)
+            self.assertEqual(result["config"]["attnres_block_size"], 6)
+        for flag, expected in (("1", True), ("0", False)):
+            text = LOG.replace(HEADER, HEADER + f"\nROUTING variant=block_attnres block_size=6 inject={flag}")
+            self.assertIs(module.parse_log(text)["config"]["attnres_inject"], expected)
+        with self.assertRaises(ValueError):
+            module.parse_log(LOG.replace(HEADER, HEADER + "\nROUTING variant=unknown block_size=0"))
+
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)
         self.assertEqual(len(result["history"]), 2)
