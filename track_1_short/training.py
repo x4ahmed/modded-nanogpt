@@ -111,6 +111,21 @@ class TrainingManager():
             eps=1e-10,
             weight_decay=0.005,
         )
+        if model.routing == "block_attnres":
+            # Queries as the MUDD coefficients; the layer-10 value-embedding gate as ve_gate_bank.
+            self.param_table["attnres_queries"] = dict(optim="adam", comms="replicated",
+                                                       adam_betas=[0.9, 0.99], lr_mul=0.25, wd_mul=0.0)
+            self.param_table["attnres_ve_gate"] = dict(self.param_table["ve_gate_bank"])
+            # Stands in for mu[10], mu[11]: the MUDD bias settings.
+            self.param_table["attnres_last_inject"] = dict(self.param_table["mudd_b2"])
+            for label in ("attnres_queries", "attnres_ve_gate", "attnres_last_inject"):
+                self.scatter_order.append(label)
+                self.work_order.append(label)
+        if model.routing == "static":
+            # The grouped deltas mudd_w2g produced, now constants: same optimizer settings.
+            self.param_table["mudd_static_deltas"] = dict(self.param_table["mudd_w2g"])
+            self.scatter_order.append("mudd_static_deltas")
+            self.work_order.append("mudd_static_deltas")
 
         anvil_defaults = dict(
             lr=0.023,

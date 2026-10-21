@@ -28,6 +28,20 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+ROUTING = os.environ.get("RTX_ROUTING", "baseline")
+ATTNRES_BLOCK_SIZE = int(os.environ.get("RTX_ATTNRES_BLOCK_SIZE", "6"))
+# 1: block AttnRes keeps the record's x0 / n-gram injections and layer-6 skip (only routing changes).
+# 0: AttnRes also replaces those (the original, confounded arm).
+ATTNRES_INJECT = os.environ.get("RTX_ATTNRES_INJECT", "1")
+if ATTNRES_INJECT not in ("0", "1"):
+    raise ValueError("RTX_ATTNRES_INJECT must be 0 or 1")
+ATTNRES_INJECT = ATTNRES_INJECT == "1"
+if ROUTING not in ("baseline", "static", "block_attnres"):
+    raise ValueError("RTX_ROUTING must be baseline, static, or block_attnres")
+if ATTNRES_BLOCK_SIZE < 1 or ATTNRES_BLOCK_SIZE > 17:
+    raise ValueError("RTX_ATTNRES_BLOCK_SIZE must be between 1 and 17 active sublayers")
+if not PORTABLE and ROUTING != "baseline":
+    raise ValueError("Routing experiments require PORTABLE=1")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048

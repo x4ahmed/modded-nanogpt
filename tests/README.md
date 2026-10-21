@@ -49,3 +49,13 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Residual-routing experiment
+
+Select explicitly: `python -u tests/check_rtx5090.py --routing block_attnres --block-size 6 --seed 999`.
+Use `--routing static` for the simpler MUDD ablation. Block mode keeps the x0/n-gram injections and layer-6 skip
+by default; `--attnres-inject 0` checks the arm that drops them. The default remains baseline;
+the checker clears inherited RTX environment flags. Block mode checks routing gradients
+and actual query updates in addition to the existing numerical/memory checks.
+CPU math/backward/integration: `python -m unittest discover -s tests -p test_residual_routing.py`.
+See `docs/attention-residuals.md` for architecture changes and full-run commands.
