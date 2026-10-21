@@ -15,7 +15,7 @@
 ## Goal and repository
 - Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
 - Frozen local branch: baseline (5be1ba0); active: experiment/attention-residuals, branched from baseline.
-- Publish baseline and experiment/attention-residuals; retain remote rtx-local-v2. Future experiments branch from baseline.
+- Published baseline and experiment/attention-residuals (code 7a47c05); remote rtx-local-v2 retained. Future experiments branch from baseline.
 - Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
 - Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
@@ -72,6 +72,7 @@
 - Compare candidates on the same seeds/settings; session variance is not cross-session variance.
 - Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
 - Notion root and Progress updated/verified 2026-10-21: 5/5 baseline, variance, and upstream gap.
+- Progress links Attention Residuals experiment (2026-10-22): diagram, partial-isolation caveat, five-seed results table; GPU pending.
 - Mean loss is 0.0148572 above upstream ≤3.28; no seed meets target. Capacity/eval differences are not isolated.
 
 ## Verification commands

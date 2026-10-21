@@ -1,5 +1,10 @@
 # Residual-routing experiments (awaiting GPU validation)
 
+![Baseline versus adapted block AttnRes](attention-residuals-before-after.png)
+
+[Notion experiment and results](https://app.notion.com/p/4000b758a24e81fbb15dc3b62f07d765).
+Diagram is conceptual: the no-cross-token-mixing label applies to depth routing, not self-attention.
+
 Reference branch: `baseline`, training commit `5be1ba0`.
 Experiment branch: `experiment/attention-residuals`, created directly from baseline.
 Future experiments must branch from baseline, not from this experiment.
