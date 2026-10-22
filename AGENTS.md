@@ -54,8 +54,8 @@
 ## Open issue and next steps
 - Active: Gated DeltaNet. RTX_DELTANET=1 replaces layer 5 attention (RTX_DELTANET_LAYER 0|2|5); see docs/gated-deltanet.md.
 - Needs pip install flash-linear-attention (fla) in ~/venvs/nanogpt; fla wrapped as a custom op; backward recomputes the layer.
-- 31 CPU/Bash tests pass locally (2026-10-22, fla swapped for a torch recurrence); GPU unverified.
-- Smoke: python -u tests/check_rtx5090.py --deltanet 1 --seed 999 (includes fla-vs-reference parity). Then ONE seed first.
+- 31 CPU/Bash tests pass locally (fla swapped for a torch recurrence). GPU smoke incl. fla parity passed 2026-10-22 (user report).
+- Seed 999 full run in progress (2026-10-22); decide by the screening rule before running 1000-1003.
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
 - Finished, not promoted (5 seeds each, vs 3.2949 / 861.6 s): block AttnRes +0.036 / +10%; minimal AttnRes readout
   +0.010 / +0.6%; bigram output prior +0.0025 / +0.85%. Notion Ideas page has the scoreboard.
