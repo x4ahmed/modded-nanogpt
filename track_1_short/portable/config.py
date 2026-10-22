@@ -28,6 +28,10 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+# Post-loop readout: "mudd" (baseline) or "attnres" (one depth-attention readout, model/attnres_readout.py).
+READOUT = os.environ.get("RTX_READOUT", "mudd")
+if READOUT not in ("mudd", "attnres"):
+    raise ValueError("RTX_READOUT must be mudd or attnres")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048

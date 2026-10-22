@@ -49,3 +49,9 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Minimal AttnRes readout
+
+GPU: `python -u tests/check_rtx5090.py --readout attnres --seed 999`. Default `--readout mudd`
+is the baseline. The checker also requires readout gradients and a changed query after an Adam step.
+CPU: `python -m unittest discover -s tests -p test_attnres_readout.py`. See `docs/minimal-attnres.md`.

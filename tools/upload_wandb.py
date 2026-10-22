@@ -38,6 +38,13 @@ def parse_log(text):
                   val_seq_len=int(val_seq), eval_ce_slab_rows=int(slab),
                   planned_updates=planned, scheduled_updates=scheduled,
                   full_schedule=planned == scheduled)
+    readout = [line for line in lines[start + 1:] if line.startswith("READOUT ")]
+    config["readout_variant"] = "mudd"  # Historical logs predate the selector.
+    if readout:
+        match = re.fullmatch(r"READOUT variant=(mudd|attnres)", readout[0])
+        if len(readout) != 1 or not match:
+            raise ValueError("Invalid readout configuration.")
+        config["readout_variant"] = match[1]
     history, finals = {}, []
     summary = {"canonical_mask_fallback": False}
     previous = -1

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
+from track_1_short.model.attnres_readout import depth_readout, initial_bias
 from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
@@ -193,6 +194,12 @@ class GPT(nn.Module):
         self.init_misc(model_dim, num_layers)
         self.init_mudd(num_layers, model_dim)
         self.init_mudd_gate(model_dim)
+        self.readout = portable_config.READOUT
+        if self.readout == "attnres":
+            # Depth readout over x and the post-loop MUDD mix's 10 sources (forward). Zero query;
+            # the bias starts x at weight 0.9. fp32, outside cast_matrix_weights_bf16.
+            self.readout_query = nn.Parameter(torch.zeros(model_dim, device=device))
+            self.readout_bias = nn.Parameter(initial_bias(11).to(device))
 
         # Auto-label parameters
         for name, param in self.named_parameters():
@@ -778,12 +785,16 @@ class GPT(nn.Module):
             ve[2][None].to(dtype=x.dtype), ve[10][None].to(dtype=x.dtype), ve[8][None].to(dtype=x.dtype),
             mlp_in, late_attn_in[0],
         ]
-        mu, deltas = self.forward_mudd_grouped(x, id=1, num_coef=len(sources))
-        grouped = lambda t: t.unflatten(-1, (MUDD_GROUPS, -1))  # (B, T, D) -> (B, T, G, D/G)
-        mixed = grouped(x)
-        for k, src in enumerate(sources):
-            mixed = mixed + (mu[k] + deltas[..., k, :]).unsqueeze(-1) * grouped(src)
-        x = mixed.flatten(-2)
+        if self.readout == "attnres":
+            # Minimal AttnRes: a softmax over depth (x first) replaces the MUDD mix; nothing else changes.
+            x = depth_readout((x, *sources), self.readout_query, self.readout_bias)
+        else:
+            mu, deltas = self.forward_mudd_grouped(x, id=1, num_coef=len(sources))
+            grouped = lambda t: t.unflatten(-1, (MUDD_GROUPS, -1))  # (B, T, D) -> (B, T, G, D/G)
+            mixed = grouped(x)
+            for k, src in enumerate(sources):
+                mixed = mixed + (mu[k] + deltas[..., k, :]).unsqueeze(-1) * grouped(src)
+            x = mixed.flatten(-2)
 
         return self._loss(norm(x), input_seq, target_seq, mtp_weights, prefix_weight, schedule_cfg.sampled_loss)
 

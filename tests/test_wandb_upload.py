@@ -23,6 +23,14 @@ LOG = HEADER + "\n" + "\n".join([
 
 
 class UploadTests(unittest.TestCase):
+    def test_readout_metadata(self):
+        self.assertEqual(module.parse_log(LOG)["config"]["readout_variant"], "mudd")
+        for mode in ("mudd", "attnres"):
+            text = LOG.replace(HEADER, HEADER + f"\nREADOUT variant={mode}")
+            self.assertEqual(module.parse_log(text)["config"]["readout_variant"], mode)
+        with self.assertRaises(ValueError):
+            module.parse_log(LOG.replace(HEADER, HEADER + "\nREADOUT variant=other"))
+
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)
         self.assertEqual(len(result["history"]), 2)

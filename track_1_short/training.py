@@ -112,6 +112,14 @@ class TrainingManager():
             weight_decay=0.005,
         )
 
+        if model.readout == "attnres":
+            # The readout that replaces the post-loop MUDD mix: replicated Adam, no weight decay.
+            for label in ("readout_query", "readout_bias"):
+                self.param_table[label] = dict(optim="adam", comms="replicated",
+                                              adam_betas=[0.9, 0.99], lr_mul=1.0, wd_mul=0.0)
+                self.scatter_order.append(label)
+                self.work_order.append(label)
+
         anvil_defaults = dict(
             lr=0.023,
             momentum=0.95,      # Nesterov lookahead; get_rail_beta rewrites it every step

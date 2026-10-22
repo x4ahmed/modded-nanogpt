@@ -42,7 +42,8 @@ def configure(args):
     os.environ.update(PORTABLE="1", TRAIN_SEED=str(args.seed), RTX_MAX_STEPS="2",
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
-                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5")
+                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5",
+                      RTX_READOUT=args.readout)
 
 
 def run_check(args):
@@ -71,7 +72,8 @@ def run_check(args):
     finally:
         sys.argv[0] = entry_path
 
-    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False}
+    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False, "readout_updated": False}
+    readout_labels = ("readout_query", "readout_bias")
 
     def finite(label, tensor):
         if tensor is None or not tensor.is_floating_point() or tensor.numel() == 0:
@@ -105,6 +107,10 @@ def run_check(args):
     original_collect = trainer.GradAccumulator.collect
 
     def checked_collect(accumulator):
+        if args.readout == "attnres":
+            for param in accumulator.params:
+                if getattr(param, "label", "") in readout_labels and param.grad is None:
+                    raise RuntimeError(f"Missing readout gradient: {param.label}")
         for i, param in enumerate(accumulator.params):
             finite(f"parameter gradient {i}", param.grad)
         original_collect(accumulator)
@@ -130,6 +136,9 @@ def run_check(args):
     original_step = trainer.Trainer.train_step
 
     def checked_step(instance, step, batches, tables):
+        readout_before = None
+        if args.readout == "attnres" and state["reset"] and step % 2 == 1:  # Adam steps are odd
+            readout_before = instance.uncompiled.readout_query.detach().clone()
         compiled_model = instance.model
         microbatch = 0
 
@@ -160,6 +169,10 @@ def run_check(args):
         finite("n-gram second moment", instance.ngram.exp_avg_sq)
         if state["reset"]:
             state["updates"] += 1
+        if readout_before is not None:
+            if torch.equal(readout_before, instance.uncompiled.readout_query.detach()):
+                raise RuntimeError("Readout query did not change on the Adam update")
+            state["readout_updated"] = True
         print(f"CHECK {'TRAIN' if state['reset'] else 'WARMUP'} step={step} microbatches={microbatch} finite=yes")
         return loss
 
@@ -177,12 +190,16 @@ def run_check(args):
     trainer.main()
     if state["updates"] != 2 or state["final_loss"] is None or not state["memory"]:
         raise RuntimeError(f"Incomplete verification: {state}")
+    if args.readout == "attnres" and not state["readout_updated"]:
+        raise RuntimeError("Readout optimizer update was not verified")
     print(f"RTX5090_CHECK status=pass updates=2 final_val_loss={state['final_loss']:.6f}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--readout", choices=("mudd", "attnres"), default="mudd",
+                        help="Post-loop readout: baseline MUDD mix or the minimal AttnRes readout.")
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")
     args = parser.parse_args()

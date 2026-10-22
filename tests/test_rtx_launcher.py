@@ -53,6 +53,11 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
 
+    def test_readout_runs_are_not_baseline(self):
+        result, args, _ = self.launch(TRAIN_SEED="1000", RTX_READOUT="attnres")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--name\nreadout-attnres-1gpu-seed-1000\n", args)
+
     def test_missing_seed_is_not_mislabeled(self):
         result, args, _ = self.launch(TRAIN_SEED="")
         self.assertEqual(result.returncode, 0, result.stderr)
