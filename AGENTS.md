@@ -59,10 +59,10 @@
 - 2026-10-22 review fixes: cached block RMS, one query per site (norm weight folded), layer-4 mix reused,
   learned layer-10 VE gate (attnres_ve_gate), static deltas own param (mudd_static_deltas). W&B suffix -noinject.
 - Static mode ablates final-layer/post-loop MUDD coefficients only; other gates remain dynamic.
-- No shorter schedule or removed compute blocks yet. New routing needs 5090 smoke + full pilot before five seeds.
-- Run seed 999 first; if promising, complete 1000-1003 unchanged. One run is screening, not evidence of improvement.
+- Block b6/inject1 smoke and five full seeds passed; results at 9655fc3 verified in W&B 2026-10-22.
+- Candidate loss 3.330801 ± 0.002697; time 948.471 ± 2.975 s: +0.035944 loss, +10.08% time. Do not promote.
 - Run python -u tests/check_rtx5090.py --routing block_attnres --block-size 6 --seed 999 after publication (add --attnres-inject 0 for the other arm).
-- 35 CPU/Bash tests pass locally (2026-10-22, both inject arms, injections, registration); GPU unverified.
+- 35 CPU/Bash tests pass; block b6/inject1 GPU smoke passed (loss 8.754292; headroom 2.08 GiB).
 - Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
 - canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
 - Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
@@ -72,7 +72,7 @@
 - Compare candidates on the same seeds/settings; session variance is not cross-session variance.
 - Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
 - Notion root and Progress updated/verified 2026-10-21: 5/5 baseline, variance, and upstream gap.
-- Progress links Attention Residuals experiment (2026-10-22): diagram, partial-isolation caveat, five-seed results table; GPU pending.
+- Progress/experiment updated with completed results and reflection; see docs/attention-residuals-results.md. Static arm remains untested on GPU.
 - Mean loss is 0.0148572 above upstream ≤3.28; no seed meets target. Capacity/eval differences are not isolated.
 
 ## Verification commands
