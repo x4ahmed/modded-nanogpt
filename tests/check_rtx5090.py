@@ -42,7 +42,8 @@ def configure(args):
     os.environ.update(PORTABLE="1", TRAIN_SEED=str(args.seed), RTX_MAX_STEPS="2",
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
-                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5")
+                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5",
+                      RTX_BIGRAM_PRIOR=str(args.bigram_prior))
 
 
 def run_check(args):
@@ -71,7 +72,8 @@ def run_check(args):
     finally:
         sys.argv[0] = entry_path
 
-    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False}
+    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False,
+             "prior_built": False, "prior_updated": False}
 
     def finite(label, tensor):
         if tensor is None or not tensor.is_floating_point() or tensor.numel() == 0:
@@ -91,6 +93,11 @@ def run_check(args):
             print0(message, console=console)
             if message == "Resetting model":
                 state["reset"] = True
+            if message.startswith("BIGRAM_PRIOR tokens="):
+                filled = int(re.search(r"filled_slots=(\d+)", message).group(1))
+                if filled == 0:
+                    raise RuntimeError("Bigram prior was built empty")
+                state["prior_built"] = True
             if message.startswith(("step:", "final_val_loss=")):
                 match = re.search(r"(?:val_loss:|final_val_loss=)(\S+)", message)
                 if match:
@@ -105,6 +112,10 @@ def run_check(args):
     original_collect = trainer.GradAccumulator.collect
 
     def checked_collect(accumulator):
+        if args.bigram_prior:
+            for param in accumulator.params:
+                if getattr(param, "label", "") == "bigram_prior_beta" and param.grad is None:
+                    raise RuntimeError("Missing bigram prior beta gradient")
         for i, param in enumerate(accumulator.params):
             finite(f"parameter gradient {i}", param.grad)
         original_collect(accumulator)
@@ -130,6 +141,9 @@ def run_check(args):
     original_step = trainer.Trainer.train_step
 
     def checked_step(instance, step, batches, tables):
+        beta_before = None
+        if args.bigram_prior and state["reset"] and step % 2 == 1:  # Adam steps are odd
+            beta_before = instance.uncompiled.bigram_prior_beta.detach().clone()
         compiled_model = instance.model
         microbatch = 0
 
@@ -160,6 +174,10 @@ def run_check(args):
         finite("n-gram second moment", instance.ngram.exp_avg_sq)
         if state["reset"]:
             state["updates"] += 1
+        if beta_before is not None:
+            if torch.equal(beta_before, instance.uncompiled.bigram_prior_beta.detach()):
+                raise RuntimeError("Bigram prior beta did not change on the Adam update")
+            state["prior_updated"] = True
         print(f"CHECK {'TRAIN' if state['reset'] else 'WARMUP'} step={step} microbatches={microbatch} finite=yes")
         return loss
 
@@ -177,12 +195,16 @@ def run_check(args):
     trainer.main()
     if state["updates"] != 2 or state["final_loss"] is None or not state["memory"]:
         raise RuntimeError(f"Incomplete verification: {state}")
+    if args.bigram_prior and not (state["prior_built"] and state["prior_updated"]):
+        raise RuntimeError(f"Bigram prior not verified: {state}")
     print(f"RTX5090_CHECK status=pass updates=2 final_val_loss={state['final_loss']:.6f}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--bigram-prior", type=int, choices=(0, 1), default=0,
+                        help="1: enable the bigram output prior (track_1_short/bigram_prior.py).")
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")
     args = parser.parse_args()

@@ -49,3 +49,9 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Bigram output prior
+
+GPU: `python -u tests/check_rtx5090.py --bigram-prior 1 --seed 999`. Default `--bigram-prior 0` is the
+baseline. The checker also requires a non-empty prior build, a beta gradient and a changed beta after an
+Adam step. CPU: `python -m unittest discover -s tests -p test_bigram_prior.py`. See `docs/bigram-prior.md`.

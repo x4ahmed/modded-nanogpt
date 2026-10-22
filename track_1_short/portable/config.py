@@ -28,6 +28,15 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+# Bigram output prior (track_1_short/bigram_prior.py): off by default (the baseline).
+BIGRAM_PRIOR = os.environ.get("RTX_BIGRAM_PRIOR", "0") == "1"
+BIGRAM_TOKENS = int(os.environ.get("RTX_BIGRAM_TOKENS", "100000000"))
+BIGRAM_K = int(os.environ.get("RTX_BIGRAM_K", "64"))
+BIGRAM_KAPPA = float(os.environ.get("RTX_BIGRAM_KAPPA", "1000"))
+if os.environ.get("RTX_BIGRAM_PRIOR", "0") not in ("0", "1"):
+    raise ValueError("RTX_BIGRAM_PRIOR must be 0 or 1")
+if BIGRAM_TOKENS < 2 or BIGRAM_K < 1 or BIGRAM_KAPPA <= 0:
+    raise ValueError("Bigram prior needs RTX_BIGRAM_TOKENS >= 2, RTX_BIGRAM_K >= 1, RTX_BIGRAM_KAPPA > 0")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048

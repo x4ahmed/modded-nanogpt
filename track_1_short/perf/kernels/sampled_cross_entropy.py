@@ -15,6 +15,7 @@ import torch
 import triton
 import triton.language as tl
 
+from track_1_short.bigram_prior import add_prior_, beta_grad
 from track_1_short.perf.kernels.cross_entropy import (
     CE_KERNEL_BLOCK_SIZE,
     SOFTCAP_A,
@@ -95,26 +96,30 @@ class SampledSoftcappedCrossEntropy(torch.autograd.Function):
     """
     @staticmethod
     def forward(ctx, x, mtp_weights, target_pos, prefix_pos, prefix_weight, lm_head_weight,
-                rows, rows_t, vocab_pos, x_s, w_s, grad_s):
+                rows, rows_t, vocab_pos, x_s, w_s, grad_s, prior_cols=None, prior_vals=None, prior_beta=None):
         n_rows = x.shape[0]
         P = rows.shape[0]
         x_f8 = x.div(x_s).to(torch.float8_e4m3fn)
-        logits = _ce_logit_gemm(x_f8, rows.T, x_s, w_s)  # rows.T is column-major
+        logits = _ce_logit_gemm(x_f8, rows.T, x_s, w_s).contiguous()  # rows.T is column-major
+        if prior_beta is not None:  # prior_cols are already candidate positions (bigram_prior.py)
+            add_prior_(logits, prior_cols, prior_vals, prior_beta)
         losses = torch.empty(n_rows, dtype=torch.float32, device=logits.device)
         grad_input = torch.empty((n_rows, P), dtype=torch.float8_e5m2, device=logits.device)
         sampled_ce_fwd_bwd(logits.contiguous(), target_pos, mtp_weights.contiguous(), prefix_pos,
                            prefix_weight.reshape(1).to(torch.float32).contiguous(), losses, grad_input,
                            n_rows, mtp_weights.shape[0], SOFTCAP_A, SOFTCAP_B, SOFTCAP_C, grad_s)
-        ctx.save_for_backward(x_f8, rows_t, grad_input, vocab_pos)
+        ctx.save_for_backward(x_f8, rows_t, grad_input, vocab_pos, prior_cols, prior_vals)
         ctx.scales = (x_s, w_s, grad_s)
+        ctx.has_prior = prior_beta is not None
         return losses
 
     @staticmethod
     def backward(ctx, grad_output):
-        x_f8, rows_t, grad_input, vocab_pos = ctx.saved_tensors
+        x_f8, rows_t, grad_input, vocab_pos, prior_cols, prior_vals = ctx.saved_tensors
+        grad_beta = beta_grad(grad_input, prior_cols, prior_vals, ctx.scales[2]) if ctx.has_prior else None
         grad_x, grad_w_c = _ce_backward_gemms(grad_input, rows_t, x_f8, *ctx.scales)
         # Freshly allocated (AccumulateGrad may adopt it as .grad) and never zeroed: densify writes every element.
         grad_w = torch.empty((x_f8.shape[1], vocab_pos.numel()), dtype=grad_w_c.dtype, device=grad_w_c.device)
         sampled_densify(grad_w_c.contiguous(), vocab_pos, grad_w)
-        # One slot per forward input; grad_w lands on lm_head_weight.
-        return grad_x, None, None, None, None, grad_w, None, None, None, None, None, None
+        # One slot per forward input; grad_w lands on lm_head_weight, grad_beta on the prior's beta.
+        return grad_x, None, None, None, None, grad_w, None, None, None, None, None, None, None, None, grad_beta

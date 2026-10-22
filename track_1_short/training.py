@@ -112,6 +112,13 @@ class TrainingManager():
             weight_decay=0.005,
         )
 
+        if model.bigram_prior:
+            # The bigram output prior's weight (bigram_prior.py): one replicated Adam scalar.
+            self.param_table["bigram_prior_beta"] = dict(optim="adam", comms="replicated",
+                                                         adam_betas=[0.9, 0.99], lr_mul=1.0, wd_mul=0.0)
+            self.scatter_order.append("bigram_prior_beta")
+            self.work_order.append("bigram_prior_beta")
+
         anvil_defaults = dict(
             lr=0.023,
             momentum=0.95,      # Nesterov lookahead; get_rail_beta rewrites it every step

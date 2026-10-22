@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from track_1_short.bigram_prior import add_prior_, prior_columns
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
 from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
@@ -173,6 +174,15 @@ class GPT(nn.Module):
         # Canonical token mask for the validation softmax, one bit per (prev, cur) pair.
         # Allocated all-zero == no masking.
         self.register_buffer("canon_mask", torch.zeros(self.vocab_size, self.vocab_size // 8, dtype=torch.uint8), persistent=False)
+
+        # Bigram output prior (track_1_short/bigram_prior.py). Like prefix_table, filled after the clock
+        # starts; all-zero (warmup) adds nothing. beta is the prior's learned weight.
+        self.bigram_prior = portable_config.BIGRAM_PRIOR
+        if self.bigram_prior:
+            k = portable_config.BIGRAM_K
+            self.register_buffer("bigram_idx", torch.zeros(self.vocab_size, k, dtype=torch.int32), persistent=False)
+            self.register_buffer("bigram_val", torch.zeros(self.vocab_size, k, dtype=torch.float32), persistent=False)
+            self.bigram_prior_beta = nn.Parameter(torch.tensor(1.0, device=device))
 
         # fp8 scales of the training loss (the /8 on grad_s is an exact binade shift, record #360).
         self.lm_head = CastedLinearT(model_dim, self.vocab_size, x_s=100/448, w_s=2.0/448, grad_s=(0.75 / 8) / 448)
@@ -797,20 +807,25 @@ class GPT(nn.Module):
         """
         # @Grad62304977 added tanh softcapping following Gemma 2 paper, @KoszarskyB reduced it from 30 to 15
         # @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1). @classiclarryd updated to 23*sigmoid((logits+5)/7.5)
+        # Bigram output prior: each row's previous token is its input token.
+        prior = (None, None, None)
+        if self.training and self.bigram_prior:
+            col_of_class = sampled_loss.vocab_pos if sampled_loss is not None else None
+            prior = (*prior_columns(self.bigram_idx, self.bigram_val, input_seq, col_of_class), self.bigram_prior_beta)
         if self.training and sampled_loss is not None:
             # Targets and prefix targets arrive as positions in the candidate set, built on the host.
             n = target_seq.size(0)
             loss_per_token = SampledSoftcappedCrossEntropy.apply(
                 x.view(-1, x.size(-1)), mtp_weights, sampled_loss.target_pos[:n], sampled_loss.prefix_pos[:n],
                 prefix_weight, self.lm_head.weight, sampled_loss.rows, sampled_loss.rows_t, sampled_loss.vocab_pos,
-                self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s,
+                self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s, *prior,
             )
         elif self.training:
             prefix_target_seq = self.prefix_table[target_seq]
             loss_per_token = FusedSoftcappedCrossEntropy.apply(
                 x.view(-1, x.size(-1)), target_seq, mtp_weights, prefix_target_seq, prefix_weight,
                 self.lm_head.weight, self._lm_head_f8_col, self._lm_head_f8_row,
-                self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s,
+                self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s, *prior,
             )
         else:
             # Every step is row-local, so slabs of EVAL_CE_SLAB_ROWS rows give the same per-token losses
@@ -821,7 +836,11 @@ class GPT(nn.Module):
             for lo in range(0, x.size(0), EVAL_CE_SLAB_ROWS):
                 hi = min(lo + EVAL_CE_SLAB_ROWS, x.size(0))
                 # The softcap runs in bf16 and upcasts after, as record #360.
-                logits = (23 * torch.sigmoid((self.lm_head(x[lo:hi]) + 5) / 7.5)).float()
+                raw = self.lm_head(x[lo:hi])
+                if self.bigram_prior:  # the same prior as training, on the bf16 raw logits
+                    cols, vals = prior_columns(self.bigram_idx, self.bigram_val, input_seq[lo:hi])
+                    raw = add_prior_(raw.contiguous(), cols, vals, self.bigram_prior_beta)
+                logits = (23 * torch.sigmoid((raw + 5) / 7.5)).float()
                 # Drop the tokens the tokenizer would never emit after input_seq. -60 is well below
                 # the 0..23 the softcap leaves, so a dropped token contributes nothing to the softmax.
                 dropped = (self.canon_mask[input_seq[lo:hi], :, None] >> shifts & 1).view(logits.shape).bool()

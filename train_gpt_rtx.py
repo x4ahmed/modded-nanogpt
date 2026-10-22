@@ -35,6 +35,7 @@ import torch._dynamo as dynamo
 import torch.distributed as dist
 from torch import nn
 
+from track_1_short.bigram_prior import build_bigram_prior, read_train_tokens
 from track_1_short.canonical_mask import BackgroundCanonicalMask
 from track_1_short.config import (
     LR_COOLDOWN_FRAC,
@@ -152,6 +153,8 @@ def main():
            f"record's), validation {val_seq}-token forwards, MLP tile 128x{mlp_block_n()}, eval CE slab "
            f"{rtx.EVAL_CE_SLAB_ROWS} rows, steps {total_steps}/{schedule.total_steps}"
            f"{' (PREFLIGHT)' if PREFLIGHT else ''}", console=True)
+    print0(f"BIGRAM_PRIOR_CONFIG enabled={int(rtx.BIGRAM_PRIOR)} tokens={rtx.BIGRAM_TOKENS} k={rtx.BIGRAM_K} "
+           f"kappa={rtx.BIGRAM_KAPPA:g}", console=True)
     flush_log()
 
     ########################################
@@ -266,6 +269,19 @@ def main():
     # Prefix-token table: one process builds every bucket (the record splits them across ranks).
     model.prefix_table.copy_(build_prefix_table_bucket(model.vocab_size, bucket=0, num_buckets=1))
     sampled.set_prefix_table(model.prefix_table.cpu().numpy())
+    if rtx.BIGRAM_PRIOR:
+        # Bigram output prior from the first BIGRAM_TOKENS training tokens, on the clock (bigram_prior.py).
+        prior_start = time.perf_counter()
+        idx, val = build_bigram_prior(read_train_tokens(args.train_files, rtx.BIGRAM_TOKENS, device),
+                                      uncompiled.vocab_size, rtx.BIGRAM_K, rtx.BIGRAM_KAPPA)
+        uncompiled.bigram_idx.copy_(idx)
+        uncompiled.bigram_val.copy_(val)
+        filled = int((idx > 0).sum())
+        del idx, val
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()  # the build's sort buffers would otherwise stay reserved
+        print0(f"BIGRAM_PRIOR tokens={rtx.BIGRAM_TOKENS} k={rtx.BIGRAM_K} kappa={rtx.BIGRAM_KAPPA:g} "
+               f"filled_slots={filled} build_ms={1000 * (time.perf_counter() - prior_start):.0f}", console=True)
     for step in range(total_steps + 1):
         last_step = step == total_steps
         training_manager.advance_schedule(step)

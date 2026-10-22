@@ -23,6 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
+from track_1_short.bigram_prior import add_prior_, beta_grad
 from track_1_short.perf.kernels.transpose import transpose_copy
 
 SOFTCAP_A, SOFTCAP_B, SOFTCAP_C = 23.0, 5.0, 7.5
@@ -390,10 +391,12 @@ class FusedSoftcappedCrossEntropy(torch.autograd.Function):
     grad_output: the kernel already folded the gradient of loss.sum() into grad_input."""
     @staticmethod
     def forward(ctx, x, targets, mtp_weights, prefix_targets, prefix_weight, lm_head_weight,
-                w_f8_col, w_f8_row, x_s, w_s, grad_s):
+                w_f8_col, w_f8_row, x_s, w_s, grad_s, prior_cols=None, prior_vals=None, prior_beta=None):
         x_f8 = x.div(x_s).to(torch.float8_e4m3fn)
         # w_f8_col.T is contiguous, so this is a zero-copy column-major view.
-        logits = _ce_logit_gemm(x_f8, w_f8_col.T.contiguous().T, x_s, w_s)
+        logits = _ce_logit_gemm(x_f8, w_f8_col.T.contiguous().T, x_s, w_s).contiguous()
+        if prior_beta is not None:  # bigram output prior, added to the raw e4m3 logits (bigram_prior.py)
+            add_prior_(logits, prior_cols, prior_vals, prior_beta)
 
         n_rows, n_cols = logits.shape
         n_predict = mtp_weights.shape[0]
@@ -404,17 +407,19 @@ class FusedSoftcappedCrossEntropy(torch.autograd.Function):
                    losses, grad_input, n_rows, n_predict, SOFTCAP_A, SOFTCAP_B, SOFTCAP_C, grad_s)
 
         # The backward's second operand needs w_f8.T column-major, i.e. the row-major cache.
-        ctx.save_for_backward(x_f8, w_f8_row, grad_input)
+        ctx.save_for_backward(x_f8, w_f8_row, grad_input, prior_cols, prior_vals)
         ctx.scales = (x_s, w_s, grad_s)
+        ctx.has_prior = prior_beta is not None
         return losses
 
     @staticmethod
     def backward(ctx, grad_output):
-        x_f8, w_f8_row, grad_input = ctx.saved_tensors
+        x_f8, w_f8_row, grad_input, prior_cols, prior_vals = ctx.saved_tensors
         x_s, w_s, grad_s = ctx.scales
+        grad_beta = beta_grad(grad_input, prior_cols, prior_vals, grad_s) if ctx.has_prior else None
         grad_x, grad_w = _ce_backward_gemms(grad_input, w_f8_row, x_f8, x_s, w_s, grad_s)
-        # One slot per forward input; grad_w lands on lm_head_weight.
-        return grad_x, None, None, None, None, grad_w, None, None, None, None, None
+        # One slot per forward input; grad_w lands on lm_head_weight, grad_beta on the prior's beta.
+        return grad_x, None, None, None, None, grad_w, None, None, None, None, None, None, None, grad_beta
 
 
 # -----------------------------------------------------------------------------

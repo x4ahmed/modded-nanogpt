@@ -38,6 +38,20 @@ def parse_log(text):
                   val_seq_len=int(val_seq), eval_ce_slab_rows=int(slab),
                   planned_updates=planned, scheduled_updates=scheduled,
                   full_schedule=planned == scheduled)
+    prior = [line for line in lines[start + 1:] if line.startswith("BIGRAM_PRIOR_CONFIG ")]
+    config["bigram_prior"] = False  # Historical logs predate the prior.
+    if prior:
+        match = re.fullmatch(r"BIGRAM_PRIOR_CONFIG enabled=([01]) tokens=(\d+) k=(\d+) kappa=(\S+)", prior[0])
+        if len(prior) != 1 or not match:
+            raise ValueError("Invalid bigram prior configuration.")
+        config["bigram_prior"] = match[1] == "1"
+        if config["bigram_prior"]:
+            config.update(bigram_tokens=int(match[2]), bigram_k=int(match[3]), bigram_kappa=float(match[4]))
+    built = [line for line in lines[start + 1:] if line.startswith("BIGRAM_PRIOR tokens=")]
+    if built:
+        match = re.search(r"filled_slots=(\d+) build_ms=(\d+)", built[0])
+        if match:
+            config.update(bigram_filled_slots=int(match[1]), bigram_build_ms=int(match[2]))
     history, finals = {}, []
     summary = {"canonical_mask_fallback": False}
     previous = -1

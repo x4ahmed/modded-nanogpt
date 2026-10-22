@@ -23,6 +23,16 @@ LOG = HEADER + "\n" + "\n".join([
 
 
 class UploadTests(unittest.TestCase):
+    def test_bigram_prior_metadata(self):
+        self.assertFalse(module.parse_log(LOG)["config"]["bigram_prior"])
+        text = LOG.replace(HEADER, HEADER + "\nBIGRAM_PRIOR_CONFIG enabled=1 tokens=100000000 k=64 kappa=1000"
+                                            "\nBIGRAM_PRIOR tokens=100000000 k=64 kappa=1000 filled_slots=123 build_ms=4567")
+        config = module.parse_log(text)["config"]
+        self.assertTrue(config["bigram_prior"])
+        self.assertEqual((config["bigram_k"], config["bigram_build_ms"]), (64, 4567))
+        with self.assertRaises(ValueError):
+            module.parse_log(LOG.replace(HEADER, HEADER + "\nBIGRAM_PRIOR_CONFIG enabled=2"))
+
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)
         self.assertEqual(len(result["history"]), 2)
