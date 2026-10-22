@@ -67,7 +67,7 @@
 - Compare candidates on the same seeds/settings; session variance is not cross-session variance.
 - Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
 - Notion root and Progress updated/verified 2026-10-21: 5/5 baseline, variance, and upstream gap.
-- Notion Progress links the block AttnRes page; minimal AttnRes and bigram prior not yet on Notion.
+- Notion Progress has Experiment 1-3 pages; Experiment 3 (bigram prior) has plain explanation + n-gram table comparison (2026-10-22).
 - Mean loss is 0.0148572 above upstream ≤3.28; no seed meets target. Capacity/eval differences are not isolated.
 
 ## Verification commands
