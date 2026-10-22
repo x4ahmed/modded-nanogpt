@@ -7,6 +7,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
+from track_1_short.model.gated_deltanet import (
+    CONV_SIZE, causal_conv, gated_delta, init_decay, segment_offsets,
+)
 from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
@@ -193,10 +196,55 @@ class GPT(nn.Module):
         self.init_misc(model_dim, num_layers)
         self.init_mudd(num_layers, model_dim)
         self.init_mudd_gate(model_dim)
+        self.deltanet = portable_config.DELTANET
+        self.deltanet_layer = portable_config.DELTANET_LAYER if self.deltanet else None
+        if self.deltanet:
+            self.init_deltanet(model_dim, num_heads, head_dim)
 
         # Auto-label parameters
         for name, param in self.named_parameters():
             param.label = name.replace('.weight', '')
+
+    def init_deltanet(self, model_dim, num_heads, head_dim):
+        """Gated DeltaNet's own parameters for deltanet_layer (model/gated_deltanet.py). q/k/v/o reuse the
+        layer's bank slices. Random inits use a private generator so the global RNG stream, and with it
+        every other parameter's init, stays the baseline's."""
+        layer = self.deltanet_layer
+        qk_dim, v_dim = self.attn_qk_dim(layer), self.attn_v_dim(layer)
+        assert layer in NARROW_QK_LAYERS and v_dim == head_dim, "Gated DeltaNet replaces a narrow, full-V layer"
+        gen = torch.Generator().manual_seed(0)
+        channels = num_heads * (2 * qk_dim + v_dim)
+        conv = torch.zeros(channels, CONV_SIZE)
+        conv[:, -1] = 1.0  # starts as the identity (current token only)
+        self.gdn_conv = nn.Parameter(conv.to(self.device))
+        # Rows 0..H-1: decay input a; rows H..2H-1: write-strength logit b.
+        self.gdn_ab = nn.Parameter((torch.randn(2 * num_heads, model_dim, generator=gen) * model_dim ** -0.5).to(self.device))
+        a_log, dt_bias = init_decay(num_heads)
+        self.gdn_A_log = nn.Parameter(a_log.to(self.device))
+        self.gdn_dt_bias = nn.Parameter(dt_bias.to(self.device))
+        self.gdn_gate = nn.Parameter((torch.randn(num_heads * v_dim, model_dim, generator=gen) * model_dim ** -0.5).to(self.device))
+        self.gdn_o_norm = nn.Parameter(torch.ones(v_dim, device=self.device))
+
+    def _gated_delta_mixer(self, x, seqlens, sa_lambdas, o_gain, aux_v, qk_w, v_w, o_w):
+        """Gated DeltaNet in place of deltanet_layer's attention; same input (normed) and output scaling."""
+        T, H = x.size(1), self.num_heads
+        qk_dim, v_dim = self.attn_qk_dim(self.deltanet_layer), self.attn_v_dim(self.deltanet_layer)
+        h = x[0]
+        qkv = F.linear(h, sa_lambdas[0] * torch.cat((qk_w, v_w)).type_as(h))
+        qkv = F.silu(causal_conv(qkv, self.gdn_conv, segment_offsets(seqlens, T)))
+        q, k, v = qkv.split((H * qk_dim, H * qk_dim, H * v_dim), dim=-1)
+        q, k, v = q.view(T, H, qk_dim), k.view(T, H, qk_dim), v.view(T, H, v_dim)
+        if aux_v is not None:
+            v = v + aux_v.view(T, H, -1)[..., :v_dim]
+        ab = F.linear(h, self.gdn_ab.type_as(h)).float()
+        g = -self.gdn_A_log.exp() * F.softplus(ab[:, :H] + self.gdn_dt_bias)
+        beta = torch.sigmoid(ab[:, H:]).to(h.dtype)
+        o = gated_delta(q.contiguous(), k.contiguous(), v.contiguous(), g.contiguous(), beta.contiguous(), seqlens)
+        o = F.rms_norm(o.float(), (v_dim,), self.gdn_o_norm).to(h.dtype)
+        gate = F.silu(F.linear(h, self.gdn_gate.type_as(h))).view(T, H, v_dim)
+        y = (o * gate).reshape(T, H * v_dim)
+        o_scale = sa_lambdas[1] if o_gain is None else sa_lambdas[1] * o_gain
+        return F.linear(y, o_scale * o_w.type_as(y))[None]
 
     def init_attn(self, model_dim, head_dim, num_heads, max_seq_len):
         # One attention module per attention layer, at the layer's head widths (no learned params --
@@ -727,7 +775,11 @@ class GPT(nn.Module):
                     block_mask=block_masks[i],
                 )
                 qk_w, v_w, o_w = attn_weights[i]
-                attn_out = self.attn[str(i)](attn_in_normed, attn_args, qk_w, v_w, o_w, qkv_fp8)
+                if i == self.deltanet_layer:
+                    attn_out = self._gated_delta_mixer(attn_in_normed, seqlens, sa_lambdas[i], attn_args.o_gain,
+                                                       aux_v, qk_w, v_w, o_w)
+                else:
+                    attn_out = self.attn[str(i)](attn_in_normed, attn_args, qk_w, v_w, o_w, qkv_fp8)
 
                 if mu is not None:
                     x = mu[8] * x + mu[9] * attn_out + mu[10] * cache[0]

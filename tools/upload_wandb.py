@@ -38,6 +38,15 @@ def parse_log(text):
                   val_seq_len=int(val_seq), eval_ce_slab_rows=int(slab),
                   planned_updates=planned, scheduled_updates=scheduled,
                   full_schedule=planned == scheduled)
+    deltanet = [line for line in lines[start + 1:] if line.startswith("DELTANET ")]
+    config["deltanet"] = False  # Historical logs predate the switch.
+    if deltanet:
+        match = re.fullmatch(r"DELTANET enabled=([01])(?: layer=(\d+) fla=(\S+))?", deltanet[0])
+        if len(deltanet) != 1 or not match or (match[1] == "1") != (match[2] is not None):
+            raise ValueError("Invalid DeltaNet configuration.")
+        config["deltanet"] = match[1] == "1"
+        if config["deltanet"]:
+            config.update(deltanet_layer=int(match[2]), fla_version=match[3])
     history, finals = {}, []
     summary = {"canonical_mask_fallback": False}
     previous = -1

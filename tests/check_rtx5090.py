@@ -42,7 +42,38 @@ def configure(args):
     os.environ.update(PORTABLE="1", TRAIN_SEED=str(args.seed), RTX_MAX_STEPS="2",
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
-                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5")
+                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5",
+                      RTX_DELTANET=str(args.deltanet), RTX_DELTANET_LAYER=str(args.deltanet_layer))
+
+
+def check_gated_delta_parity(torch):
+    """fla's kernel (forward and backward, through the custom op) against the plain-torch recurrence."""
+    from track_1_short.model.gated_deltanet import gated_delta, gated_delta_reference
+
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    T, H = 300, 6
+    cu = torch.tensor([0, 70, 70, 230, 300, 300], dtype=torch.int32, device="cuda")
+    make = lambda *shape: torch.randn(*shape, generator=gen, device="cuda")
+    q, k = make(T, H, 64).bfloat16(), make(T, H, 64).bfloat16()
+    v = make(T, H, 128).bfloat16()
+    g = -torch.rand(T, H, generator=gen, device="cuda") * 0.5
+    beta = torch.rand(T, H, generator=gen, device="cuda").bfloat16()
+    inputs = [t.clone().requires_grad_() for t in (q, k, v, g, beta)]
+    out = gated_delta(*inputs, cu)
+    ref_inputs = [t.detach().cpu().float().requires_grad_() for t in (q, k, v, g, beta)]
+    ref = gated_delta_reference(*ref_inputs, cu.cpu())
+    err = (out.float().cpu() - ref).abs().max().item()
+    if not err < 5e-2:
+        raise RuntimeError(f"Gated DeltaNet forward parity failed: max abs error {err}")
+    grad_o = make(T, H, 128)
+    out.backward(grad_o.bfloat16())
+    ref.backward(grad_o.cpu())
+    for name, a, b in zip("q k v g beta".split(), inputs, ref_inputs):
+        scale = b.grad.abs().max().item() + 1e-6
+        rel = (a.grad.float().cpu() - b.grad).abs().max().item() / scale
+        if not rel < 5e-2:
+            raise RuntimeError(f"Gated DeltaNet backward parity failed for {name}: relative error {rel}")
+    print(f"CHECK gated_delta parity pass max_forward_err={err:.2e}")
 
 
 def run_check(args):
@@ -71,7 +102,9 @@ def run_check(args):
     finally:
         sys.argv[0] = entry_path
 
-    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False}
+    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False, "gdn_updated": False}
+    if args.deltanet:
+        check_gated_delta_parity(torch)
 
     def finite(label, tensor):
         if tensor is None or not tensor.is_floating_point() or tensor.numel() == 0:
@@ -105,6 +138,10 @@ def run_check(args):
     original_collect = trainer.GradAccumulator.collect
 
     def checked_collect(accumulator):
+        if args.deltanet:
+            for param in accumulator.params:
+                if getattr(param, "label", "").startswith("gdn_") and param.grad is None:
+                    raise RuntimeError(f"Missing Gated DeltaNet gradient: {param.label}")
         for i, param in enumerate(accumulator.params):
             finite(f"parameter gradient {i}", param.grad)
         original_collect(accumulator)
@@ -130,6 +167,9 @@ def run_check(args):
     original_step = trainer.Trainer.train_step
 
     def checked_step(instance, step, batches, tables):
+        gate_before = None
+        if args.deltanet and state["reset"] and step % 2 == 1:  # Adam steps are odd
+            gate_before = instance.uncompiled.gdn_gate.detach().clone()
         compiled_model = instance.model
         microbatch = 0
 
@@ -160,6 +200,10 @@ def run_check(args):
         finite("n-gram second moment", instance.ngram.exp_avg_sq)
         if state["reset"]:
             state["updates"] += 1
+        if gate_before is not None:
+            if torch.equal(gate_before, instance.uncompiled.gdn_gate.detach()):
+                raise RuntimeError("Gated DeltaNet gate did not change on the Adam update")
+            state["gdn_updated"] = True
         print(f"CHECK {'TRAIN' if state['reset'] else 'WARMUP'} step={step} microbatches={microbatch} finite=yes")
         return loss
 
@@ -177,12 +221,17 @@ def run_check(args):
     trainer.main()
     if state["updates"] != 2 or state["final_loss"] is None or not state["memory"]:
         raise RuntimeError(f"Incomplete verification: {state}")
+    if args.deltanet and not state["gdn_updated"]:
+        raise RuntimeError("Gated DeltaNet optimizer update was not verified")
     print(f"RTX5090_CHECK status=pass updates=2 final_val_loss={state['final_loss']:.6f}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--deltanet", type=int, choices=(0, 1), default=0,
+                        help="1: Gated DeltaNet on --deltanet-layer (model/gated_deltanet.py).")
+    parser.add_argument("--deltanet-layer", type=int, choices=(0, 2, 5), default=5)
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")
     args = parser.parse_args()

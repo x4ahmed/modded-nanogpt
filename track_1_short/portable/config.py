@@ -28,6 +28,13 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+# Gated DeltaNet on one short-window attention layer (model/gated_deltanet.py); off = the baseline.
+if os.environ.get("RTX_DELTANET", "0") not in ("0", "1"):
+    raise ValueError("RTX_DELTANET must be 0 or 1")
+DELTANET = os.environ.get("RTX_DELTANET", "0") == "1"
+DELTANET_LAYER = int(os.environ.get("RTX_DELTANET_LAYER", "5"))
+if DELTANET_LAYER not in (0, 2, 5):
+    raise ValueError("RTX_DELTANET_LAYER must be a narrow short-window layer: 0, 2 or 5")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048

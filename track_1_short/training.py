@@ -112,6 +112,14 @@ class TrainingManager():
             weight_decay=0.005,
         )
 
+        if model.deltanet:
+            # Gated DeltaNet's own parameters (q/k/v/o stay in the ANVIL banks): replicated Adam.
+            for label in ("gdn_conv", "gdn_ab", "gdn_A_log", "gdn_dt_bias", "gdn_gate", "gdn_o_norm"):
+                self.param_table[label] = dict(optim="adam", comms="replicated",
+                                              adam_betas=[0.9, 0.99], lr_mul=1.0, wd_mul=0.0)
+                self.scatter_order.append(label)
+                self.work_order.append(label)
+
         anvil_defaults = dict(
             lr=0.023,
             momentum=0.95,      # Nesterov lookahead; get_rail_beta rewrites it every step

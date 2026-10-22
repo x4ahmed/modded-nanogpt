@@ -53,6 +53,11 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
 
+    def test_deltanet_runs_are_not_baseline(self):
+        result, args, _ = self.launch(TRAIN_SEED="1002", RTX_DELTANET="1", RTX_DELTANET_LAYER="2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--name\ndeltanet-l2-1gpu-seed-1002\n", args)
+
     def test_missing_seed_is_not_mislabeled(self):
         result, args, _ = self.launch(TRAIN_SEED="")
         self.assertEqual(result.returncode, 0, result.stderr)

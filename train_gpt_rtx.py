@@ -152,6 +152,11 @@ def main():
            f"record's), validation {val_seq}-token forwards, MLP tile 128x{mlp_block_n()}, eval CE slab "
            f"{rtx.EVAL_CE_SLAB_ROWS} rows, steps {total_steps}/{schedule.total_steps}"
            f"{' (PREFLIGHT)' if PREFLIGHT else ''}", console=True)
+    if rtx.DELTANET:
+        import fla  # fail before compiling if flash-linear-attention is missing
+        print0(f"DELTANET enabled=1 layer={rtx.DELTANET_LAYER} fla={getattr(fla, '__version__', 'unknown')}", console=True)
+    else:
+        print0("DELTANET enabled=0", console=True)
     flush_log()
 
     ########################################

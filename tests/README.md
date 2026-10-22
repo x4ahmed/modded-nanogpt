@@ -49,3 +49,10 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Gated DeltaNet
+
+Needs `pip install flash-linear-attention` in the training venv. GPU: `python -u tests/check_rtx5090.py
+--deltanet 1 --seed 999` first compares fla's kernel with the plain-torch recurrence (forward and
+backward), then runs the usual check plus Gated DeltaNet gradients and a changed gate after an Adam step.
+CPU: `python -m unittest discover -s tests -p test_gated_deltanet.py`. See `docs/gated-deltanet.md`.

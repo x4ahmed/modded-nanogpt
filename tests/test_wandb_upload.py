@@ -23,6 +23,14 @@ LOG = HEADER + "\n" + "\n".join([
 
 
 class UploadTests(unittest.TestCase):
+    def test_deltanet_metadata(self):
+        self.assertFalse(module.parse_log(LOG)["config"]["deltanet"])
+        config = module.parse_log(LOG.replace(HEADER, HEADER + "\nDELTANET enabled=1 layer=5 fla=0.3.2"))["config"]
+        self.assertEqual((config["deltanet"], config["deltanet_layer"], config["fla_version"]), (True, 5, "0.3.2"))
+        self.assertFalse(module.parse_log(LOG.replace(HEADER, HEADER + "\nDELTANET enabled=0"))["config"]["deltanet"])
+        with self.assertRaises(ValueError):
+            module.parse_log(LOG.replace(HEADER, HEADER + "\nDELTANET enabled=1"))
+
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)
         self.assertEqual(len(result["history"]), 2)
