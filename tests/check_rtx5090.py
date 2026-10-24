@@ -42,7 +42,8 @@ def configure(args):
     os.environ.update(PORTABLE="1", TRAIN_SEED=str(args.seed), RTX_MAX_STEPS="2",
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
-                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5")
+                      RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5",
+                      RTX_SAMPLED_SCHEDULE=args.sampled_schedule)
 
 
 def run_check(args):
@@ -183,6 +184,8 @@ def run_check(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--sampled-schedule", choices=("record", "matched", "matched_late"), default="record",
+                        help="Sampled-softmax candidate counts (track_1_short/sampled_softmax.py).")
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")
     args = parser.parse_args()

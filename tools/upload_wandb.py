@@ -38,6 +38,13 @@ def parse_log(text):
                   val_seq_len=int(val_seq), eval_ce_slab_rows=int(slab),
                   planned_updates=planned, scheduled_updates=scheduled,
                   full_schedule=planned == scheduled)
+    sampled = [line for line in lines[start + 1:] if line.startswith("SAMPLED_SCHEDULE ")]
+    config["sampled_schedule"] = "record"  # Historical logs predate the switch.
+    if sampled:
+        match = re.fullmatch(r"SAMPLED_SCHEDULE name=(\w+) counts=(\S+)", sampled[0])
+        if len(sampled) != 1 or not match:
+            raise ValueError("Invalid sampled-softmax schedule.")
+        config.update(sampled_schedule=match[1], sampled_counts=match[2])
     history, finals = {}, []
     summary = {"canonical_mask_fallback": False}
     previous = -1

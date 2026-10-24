@@ -53,6 +53,12 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
 
+    def test_sampled_schedule_runs_are_not_baseline(self):
+        for schedule, name in (("matched", "sampled-matched"), ("matched_late", "sampled-matched-late")):
+            result, args, _ = self.launch(TRAIN_SEED="999", RTX_SAMPLED_SCHEDULE=schedule)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"--name\n{name}-1gpu-seed-999\n", args)
+
     def test_missing_seed_is_not_mislabeled(self):
         result, args, _ = self.launch(TRAIN_SEED="")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -6,6 +6,7 @@
 - Preserve the RTX adaptation and unrelated user changes. Do not restore old v1 plans.
 - User permits commits and pushes to the current remote branch. Never force-push.
 - Do not claim GPU validation from CPU tests. The user runs GPU checks on the cluster.
+- Never SSH/scp to the cluster; give the user the command and ask them to paste the output.
 - Update this file after meaningful changes, test results, or decisions, before handoff.
 - Replace stale summaries rather than appending a diary. Keep under 100 lines.
 - Keep only current settings, verified results, blockers, and next steps here.
@@ -14,7 +15,8 @@
 
 ## Goal and repository
 - Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
-- Branch: rtx-local-v2. Remote: https://github.com/x4ahmed/modded-nanogpt.
+- Frozen local branch: baseline (5be1ba0); active: experiment/sampled-softmax-schedule, branched from baseline.
+- experiment/attention-residuals (block AttnRes) is finished and not promoted; future experiments branch from baseline.
 - Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
 - Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
@@ -30,10 +32,10 @@
 - Keep validation packing fixed across local comparisons; do not claim upstream metric parity.
 - Full default schedule: 1194 optimizer updates. Remove RTX_MAX_STEPS for full runs.
 - Leave NUM_SCHEDULED_ITERATIONS unset; short tests truncate, never rescale the schedule.
-- Notion's existing seed plan is 999, 1000, 1001, 1002, 1003; 999 complete, four pending.
+- Seeds 999, 1000, 1001, 1002, 1003 completed; W&B verified 2026-10-21 (see docs/baseline-five-seeds.md).
 - Training log is logs/<generated UUID>.txt; capture console separately for warnings.
 
-## Last verified state (2026-10-18)
+## Last verified state (2026-10-21)
 - Code commit f466280 fixed the observed fused-MLP NaNs on the user's 5090.
 - Narrow 128-column MLP tiles use masked pointer stores, forward/backward, both layouts.
 - FP8 math/scales and model structure were retained; wide-tile path retains descriptor stores.
@@ -51,14 +53,25 @@
 - Evidence of learning/completion, not proof of upstream parity or multi-seed stability.
 
 ## Open issue and next steps
+- Active: sampled-softmax schedule. RTX_SAMPLED_SCHEDULE=record (default) | matched | matched_late; docs/sampled-softmax.md.
+- matched: stage P 10240/8192/(10240,10240,20480), keeping the record's negatives per set for 16384-token microbatches.
+- matched_late also samples the taper at 20480. Max distinct targets per microbatch measured 5197 (2026-10-25).
+- CPU tests pass locally (2026-10-25); GPU unverified. Smoke: python -u tests/check_rtx5090.py --sampled-schedule matched.
+- Gated DeltaNet (experiment/gated-deltanet, 83fda24) five seeds: +0.0041098 loss (CI +0.0023..+0.0059), +8.17% time. Not promoted.
+- Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
+- Finished, not promoted (5 seeds each, vs 3.2949 / 861.6 s): block AttnRes +0.036 / +10%; minimal AttnRes readout
+  +0.010 / +0.6%; bigram output prior +0.0025 / +0.85%. Notion Ideas page has the scoreboard.
 - Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
 - canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
 - Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
 - Continue tracking mask warnings; never silently exclude mask overhead from timings.
-- Keep training code/settings fixed; finish seeds 1000-1003. Report mean and sample SD (n-1).
-- One full pilot exists; no statistically established v2 baseline yet.
+- Five-seed baseline at 5be1ba0: loss 3.2948572 ± 0.00104874; training 861.635 ± 1.608645 s (sample SD).
+- All five completed 1194 updates, memory gate passed, no reported mask fallback; pilots excluded.
+- Compare candidates on the same seeds/settings; session variance is not cross-session variance.
 - Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
-- Progress seed-results table: https://www.notion.so/3cb0b758a24e81faa372fac85828c1a0 (1/5 complete).
+- Notion root and Progress updated/verified 2026-10-21: 5/5 baseline, variance, and upstream gap.
+- Notion: Experiment 1-4 pages under Progress; Ideas scoreboard shows 5-seed means + mean paired differences (2026-10-24).
+- Mean loss is 0.0148572 above upstream ≤3.28; no seed meets target. Capacity/eval differences are not isolated.
 
 ## Verification commands
 - GPU diagnostics: python -u tests/diagnose_rtx5090.py

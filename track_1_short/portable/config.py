@@ -28,6 +28,10 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+# Sampled-softmax candidate counts (track_1_short/sampled_softmax.py SAMPLED_SCHEDULES); "record" = baseline.
+SAMPLED_SCHEDULE = os.environ.get("RTX_SAMPLED_SCHEDULE", "record")
+if SAMPLED_SCHEDULE != "record" and MICROBATCH_TOKENS != 16384:
+    raise ValueError("The matched sampled-softmax schedules are sized for 16384-token microbatches")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048

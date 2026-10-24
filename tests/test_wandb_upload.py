@@ -23,6 +23,15 @@ LOG = HEADER + "\n" + "\n".join([
 
 
 class UploadTests(unittest.TestCase):
+    def test_sampled_schedule_metadata(self):
+        self.assertEqual(module.parse_log(LOG)["config"]["sampled_schedule"], "record")
+        line = "\nSAMPLED_SCHEDULE name=matched_late counts=0:10240;1:8192;2:10240,10240,20480;3:20480"
+        config = module.parse_log(LOG.replace(HEADER, HEADER + line))["config"]
+        self.assertEqual(config["sampled_schedule"], "matched_late")
+        self.assertEqual(config["sampled_counts"], "0:10240;1:8192;2:10240,10240,20480;3:20480")
+        with self.assertRaises(ValueError):
+            module.parse_log(LOG.replace(HEADER, HEADER + "\nSAMPLED_SCHEDULE name=x"))
+
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)
         self.assertEqual(len(result["history"]), 2)

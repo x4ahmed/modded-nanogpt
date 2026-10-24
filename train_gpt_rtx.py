@@ -36,6 +36,7 @@ import torch.distributed as dist
 from torch import nn
 
 from track_1_short.canonical_mask import BackgroundCanonicalMask
+from track_1_short.sampled_softmax import CANDIDATES_BY_STAGE
 from track_1_short.config import (
     LR_COOLDOWN_FRAC,
     SPLIT_EMBED_STAGE,
@@ -152,6 +153,9 @@ def main():
            f"record's), validation {val_seq}-token forwards, MLP tile 128x{mlp_block_n()}, eval CE slab "
            f"{rtx.EVAL_CE_SLAB_ROWS} rows, steps {total_steps}/{schedule.total_steps}"
            f"{' (PREFLIGHT)' if PREFLIGHT else ''}", console=True)
+    print0(f"SAMPLED_SCHEDULE name={rtx.SAMPLED_SCHEDULE} "
+           f"counts={';'.join(f'{k}:' + ','.join(map(str, v)) for k, v in sorted(CANDIDATES_BY_STAGE.items()))}",
+           console=True)
     flush_log()
 
     ########################################

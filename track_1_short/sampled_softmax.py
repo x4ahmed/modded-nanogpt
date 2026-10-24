@@ -22,6 +22,9 @@ ramps 14336 -> 14336 -> 24576 in equal thirds; the batch taper (stage 3) and the
 softmax. For the default 1122 + 52 + 20 steps: P = 10240 on steps 0-680, 14336 on 681-964, 24576 on
 965-1106, and the full softmax from step 1107 on.
 
+RTX_SAMPLED_SCHEDULE (portable/config.py) can swap this table for "matched" or "matched_late"
+(SAMPLED_SCHEDULES below, docs/sampled-softmax.md); the default "record" is the schedule above.
+
 Requires exactly one microbatch per step: see the race contract in perf/sampled_softmax_overlap.py.
 
 Provenance: record #360 (ANVIL2).
@@ -34,6 +37,7 @@ import torch
 from torch import Tensor
 
 from track_1_short.perf.kernels.transpose import transpose_copy
+from track_1_short.portable import config as portable_config
 from track_1_short.perf.sampled_softmax_overlap import CandidateStaging, StagedCandidates
 from track_1_short.schedule import TrainingSchedule
 
@@ -42,11 +46,43 @@ from track_1_short.schedule import TrainingSchedule
 # multiple of the CE kernel's vector width (256 threads * 8) and cover the microbatch's distinct targets
 # (~11k at batch 24). Stage 2 ramps rather than steps: "the count has to reach full-softmax resolution
 # before the batch taper" (record #360).
-CANDIDATES_BY_STAGE = {
-    0: (10240,),
-    1: (10240,),
-    2: (14336, 14336, 24576),
+#
+# RTX_SAMPLED_SCHEDULE picks the table (portable/config.py); "record" is the record's, unchanged.
+# The port builds one set per 16384-token microbatch, where the record builds one per rank-step of
+# 16384 / 32768 / 49152 tokens in stages 0 / 1 / 2: from stage 1 on, the port's sets hold fewer distinct
+# targets at the same P, so each carries more negatives (and costs more) than the record's.
+# "matched" sizes each count to this port's distinct targets plus the record's number of negatives
+# (record P minus the record's distinct targets), rounded up to a legal width; see docs/sampled-softmax.md.
+SAMPLED_SCHEDULES = {
+    "record": {
+        0: (10240,),
+        1: (10240,),
+        2: (14336, 14336, 24576),
+    },
+    # Distinct targets measured on the first training shard (3000 windows): 16384 tokens mean 4278
+    # (max 5197), 32768 tokens mean 6993, 49152 tokens mean 9150. Record negatives: stage 1 10240 - 6993
+    # = 3247, stage 2 14336 - 9150 = 5186 and 24576 - 9150 = 15426; plus the port's 4278 distinct targets
+    # -> 7525, 9464, 19704 -> rounded up to multiples of 2048. Stage 0 already matches (same tokens per set).
+    "matched": {
+        0: (10240,),
+        1: (8192,),
+        2: (10240, 10240, 20480),
+    },
+    # "matched" plus the batch taper (stage 3) on the sampled loss too; only the 20-step extension runs
+    # the full softmax. The record notes the count "has to reach full-softmax resolution before the batch
+    # taper", so this arm tests exactly that claim on this port.
+    "matched_late": {
+        0: (10240,),
+        1: (8192,),
+        2: (10240, 10240, 20480),
+        3: (20480,),
+    },
 }
+# Every set must hold all of a microbatch's distinct targets (CandidateBuilder asserts it).
+assert min(p for counts in SAMPLED_SCHEDULES["matched"].values() for p in counts) > 5197 + 2048
+if portable_config.SAMPLED_SCHEDULE not in SAMPLED_SCHEDULES:
+    raise ValueError(f"RTX_SAMPLED_SCHEDULE must be one of {sorted(SAMPLED_SCHEDULES)}")
+CANDIDATES_BY_STAGE = SAMPLED_SCHEDULES[portable_config.SAMPLED_SCHEDULE]
 ALL_CANDIDATE_COUNTS = tuple(sorted({p for counts in CANDIDATES_BY_STAGE.values() for p in counts}))
 # Coprime with the vocabulary, so k * stride mod V is a permutation (record #360).
 NEGATIVE_STRIDE = 20011
