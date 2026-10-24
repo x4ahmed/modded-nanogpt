@@ -55,7 +55,7 @@
 - Active: Gated DeltaNet. RTX_DELTANET=1 replaces layer 5 attention (RTX_DELTANET_LAYER 0|2|5); see docs/gated-deltanet.md.
 - Needs pip install flash-linear-attention (fla) in ~/venvs/nanogpt; fla wrapped as a custom op; backward recomputes the layer.
 - 31 CPU/Bash tests pass locally (fla swapped for a torch recurrence). GPU smoke incl. fla parity passed 2026-10-22 (user report).
-- Seed 999 done (83fda24, fla 0.5.2): loss 3.297716 (+0.00274 vs baseline seed 999), 930.6 s (+8.3%). Stopped by screening rule; not promoted.
+- Seed 999 done (83fda24, fla 0.5.2): loss 3.297716 (+0.00274 vs baseline seed 999), 930.6 s (+8.3%). Not promoted; seeds 1000-1003 being run at 83fda24 for a consistent 5-seed table (2026-10-24).
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
 - Finished, not promoted (5 seeds each, vs 3.2949 / 861.6 s): block AttnRes +0.036 / +10%; minimal AttnRes readout
   +0.010 / +0.6%; bigram output prior +0.0025 / +0.85%. Notion Ideas page has the scoreboard.
