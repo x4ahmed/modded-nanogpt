@@ -184,7 +184,7 @@ def run_check(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
-    parser.add_argument("--sampled-schedule", choices=("record", "matched", "matched_late"), default="record",
+    parser.add_argument("--sampled-schedule", choices=("record", "record_late", "matched", "matched_late"), default="record",
                         help="Sampled-softmax candidate counts (track_1_short/sampled_softmax.py).")
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")

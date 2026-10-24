@@ -70,8 +70,15 @@ class SampledScheduleTests(unittest.TestCase):
         c = out["counts"]
         self.assertEqual((c[1106], c[1107], c[1173], c[1174], c[1193]), (20480, 20480, 20480, 0, 0))
 
+    def test_record_late_changes_only_the_taper(self):
+        record, late = self.run_probe("record")["counts"], self.run_probe("record_late")["counts"]
+        changed = [s for s in range(1194) if record[s] != late[s]]
+        self.assertEqual((changed[0], changed[-1]), (1107, 1173))  # exactly the batch-taper stage
+        self.assertEqual({late[s] for s in changed}, {24576})
+        self.assertEqual(late[1174], 0)  # the extension keeps the full softmax
+
     def test_every_count_is_legal_and_builds(self):
-        for name in ("record", "matched", "matched_late"):
+        for name in ("record", "record_late", "matched", "matched_late"):
             out = self.run_probe(name)
             self.assertEqual(out["distinct"], 5197)
             for p, ok in out["built"].items():

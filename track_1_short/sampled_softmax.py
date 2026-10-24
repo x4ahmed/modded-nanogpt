@@ -68,6 +68,16 @@ SAMPLED_SCHEDULES = {
         1: (8192,),
         2: (10240, 10240, 20480),
     },
+    # The record's counts unchanged, plus the batch taper (stage 3) on the sampled loss at the record's
+    # last count; only the 20-step extension runs the full softmax. Against "record" this changes only
+    # the taper, so a result here is a claim about the record's schedule itself (transferable upstream),
+    # unlike "matched", which only corrects this port's per-microbatch sets.
+    "record_late": {
+        0: (10240,),
+        1: (10240,),
+        2: (14336, 14336, 24576),
+        3: (24576,),
+    },
     # "matched" plus the batch taper (stage 3) on the sampled loss too; only the 20-step extension runs
     # the full softmax. The record notes the count "has to reach full-softmax resolution before the batch
     # taper", so this arm tests exactly that claim on this port.
