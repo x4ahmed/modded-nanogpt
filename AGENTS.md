@@ -58,7 +58,8 @@
 - matched: stage P 10240/8192/(10240,10240,20480), keeping the record's negatives per set for 16384-token microbatches.
 - matched_late also samples the taper at 20480. Max distinct targets per microbatch measured 5197 (2026-10-25).
 - CPU tests pass locally. GPU smoke --sampled-schedule record_late passed 2026-10-28 (user report).
-- Running seed 999 back to back in one allocation: record then record_late (same-session timing). Results pending.
+- Seed 999, same allocation (2026-10-28): record 3.295181 / 832.237 s; record_late 3.301586 / 830.577 s.
+- record_late: +0.0064 loss (> +0.002 screen), -1.7 s (-0.2%). Stopped, not promoted. W&B sampled-record-late-1gpu-seed-999.
 - Gated DeltaNet (experiment/gated-deltanet, 83fda24) five seeds: +0.0041098 loss (CI +0.0023..+0.0059), +8.17% time. Not promoted.
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
 - Finished, not promoted (5 seeds each, vs 3.2949 / 861.6 s): block AttnRes +0.036 / +10%; minimal AttnRes readout
