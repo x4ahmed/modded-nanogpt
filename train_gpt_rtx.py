@@ -51,6 +51,7 @@ from track_1_short.ngram_table import NGRAM_DIM, NGRAM_VOCAB_SIZE, is_update_ste
 from track_1_short.optim.anvil import anvil_bank_update
 from track_1_short.perf.kernels.mlp import mlp_block_n, prime_stage_cache
 from track_1_short.perf.pinned_batches import PinnedBatchStaging
+from track_1_short.perf.sampled_softmax_overlap import PINNED_SLOTS as CANDIDATE_SLOTS
 from track_1_short.portable import config as rtx
 from track_1_short.portable.attention import build_window_masks
 from track_1_short.portable.data import MicrobatchLoader, microbatch_cu_seqlens_rows, validation_batches
@@ -135,7 +136,8 @@ def main():
     assert args.val_tokens % val_seq == 0
 
     staging = PinnedBatchStaging(max(mb_tokens, val_seq),
-                                 max(microbatch_cu_seqlens_rows(mb_tokens), cu_seqlens_rows(val_seq)), device)
+                                 max(microbatch_cu_seqlens_rows(mb_tokens), cu_seqlens_rows(val_seq)), device,
+                                 slots=rtx.BATCH_STAGING_SLOTS)
     schedule = TrainingSchedule(
         TRAINING_STAGES, args.num_scheduled_iterations, args.num_extension_iterations, device=device,
         cooldown_frac=LR_COOLDOWN_FRAC, split_embed_stage=SPLIT_EMBED_STAGE, ws_post_yarn_ext=WS_POST_YARN_EXT,
@@ -152,6 +154,7 @@ def main():
            f"record's), validation {val_seq}-token forwards, MLP tile 128x{mlp_block_n()}, eval CE slab "
            f"{rtx.EVAL_CE_SLAB_ROWS} rows, steps {total_steps}/{schedule.total_steps}"
            f"{' (PREFLIGHT)' if PREFLIGHT else ''}", console=True)
+    print0(f"ASYNC_UPLOADS batch_slots={rtx.BATCH_STAGING_SLOTS} candidate_slots={CANDIDATE_SLOTS}", console=True)
     flush_log()
 
     ########################################

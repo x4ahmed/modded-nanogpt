@@ -3,9 +3,12 @@
 The record builds one candidate set per rank per step, from that rank's microbatch, on a prep thread
 and a side copy stream, and relies on exactly one microbatch per step (its loss keeps no copy of the
 gathered rows). Here each microbatch plays one of those ranks: its set is built from its own targets
-by the record's CandidateBuilder and uploaded synchronously right before its forward. Microbatches run
-forward and backward one after another, so a set's buffers are never rewritten before its backward has
-read them -- the record's race contract, kept by construction.
+by the record's CandidateBuilder right before its forward and uploaded through a ring of pinned host
+slots (the record's CandidateStaging ring, without its prep thread and copy stream) as async copies on
+the compute stream. A plain copy_ from pageable memory synchronizes the stream: the host would wait for
+the device to drain before every forward, and the device would idle while the host launched it.
+Microbatches run forward and backward one after another on that one stream, so a set's device buffers
+are never rewritten before its backward has read them -- the record's race contract, kept by stream order.
 
 The negatives come from one stride sweep that advances with every build (the record staggers one
 sweep per rank instead): consecutive microbatches get disjoint negative windows, and across a run every
@@ -16,6 +19,7 @@ import torch
 from torch import Tensor
 
 from track_1_short.perf.kernels.transpose import transpose_copy
+from track_1_short.perf.sampled_softmax_overlap import PINNED_SLOTS, PinnedSlot
 from track_1_short.sampled_softmax import CandidateBuilder, SampledLoss, _stage_index, candidate_count_at
 from track_1_short.schedule import TrainingSchedule
 
@@ -42,6 +46,11 @@ class PortableSampledSoftmax:
                            target_pos=target_pos, prefix_pos=prefix_pos, vocab_pos=vocab_pos)
             for p in p_values
         }
+        # Each slot's event is recorded after its H2Ds; the host rewrites a slot only once they retired.
+        pinned = lambda n: torch.empty(n, dtype=torch.int64, pin_memory=True)
+        self.slots = [PinnedSlot(pinned(max_p), pinned(max_rows), pinned(max_rows), torch.cuda.Event())
+                      for _ in range(PINNED_SLOTS)]
+        self.next_slot = 0
         self.reset()
 
     def reset(self):
@@ -66,11 +75,18 @@ class PortableSampledSoftmax:
             return None
         inputs = self.loss_inputs[P]
         candidates, target_pos, prefix_pos = self.builder.build(P, targets_cpu.numpy(), self.prefix_table)
-        # Pageable H2D copies return once the host source is read, so the builder may reuse its scratch.
-        self.candidates[:P].copy_(torch.from_numpy(candidates))
-        inputs.target_pos[:target_pos.shape[0]].copy_(torch.from_numpy(target_pos))
+        slot = self.slots[self.next_slot]
+        self.next_slot = (self.next_slot + 1) % PINNED_SLOTS
+        slot.uploaded.synchronize()
+        uploads = [(candidates, slot.candidates, self.candidates), (target_pos, slot.target_pos, inputs.target_pos)]
         if prefix_pos is not None:
-            inputs.prefix_pos[:prefix_pos.shape[0]].copy_(torch.from_numpy(prefix_pos))
+            uploads.append((prefix_pos, slot.prefix_pos, inputs.prefix_pos))
+        # The host copy into the slot frees the builder's scratch for the next build at once.
+        for src, staged, dst in uploads:
+            n = src.shape[0]
+            staged[:n].copy_(torch.from_numpy(src))
+            dst[:n].copy_(staged[:n], non_blocking=True)
+        slot.uploaded.record()
         cand = self.candidates[:P]
         torch.index_select(lm_head_f8_col.T.view(torch.uint8), 0, cand, out=inputs.rows.view(torch.uint8))
         transpose_copy(inputs.rows.view(torch.uint8), inputs.rows_t.view(torch.uint8))

@@ -16,6 +16,8 @@ under PORTABLE and default to values sized for one 32 GB RTX 5090:
 """
 import os
 
+from track_1_short.config import TRAINING_STAGES
+
 PORTABLE = os.environ.get("PORTABLE") == "1"
 
 # The record's world: gradients are averaged over 8 ranks, so a step's summed microbatch gradients
@@ -28,6 +30,12 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+# Pinned slots of the batch upload ring (perf/pinned_batches.py). A step uploads all its microbatches
+# before its first forward, so the record's 16 slots wrapped inside a 24- or 20-microbatch step: its 17th
+# upload waited for the device to finish the previous step, which then idled while the host loaded the
+# rest. With two steps' worth, an upload can only wait for a copy of the step before last, while the
+# device still has a step queued: the host never waits for it to drain.
+BATCH_STAGING_SLOTS = 2 * max(stage.batch_size // MICROBATCH_TOKENS for stage in TRAINING_STAGES)
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048

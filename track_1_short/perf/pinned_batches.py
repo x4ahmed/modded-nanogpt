@@ -22,7 +22,8 @@ import torch
 from torch import Tensor
 
 # Slots in the ring (record #360's _PINLD_RING): deeper than the loader's lookahead, so a slot's copy has
-# long retired when it comes round again.
+# long retired when it comes round again. The single-GPU port uploads a whole step's microbatches at once
+# and passes a deeper ring (portable/config.py BATCH_STAGING_SLOTS).
 PINNED_BATCH_SLOTS = 16
 
 
@@ -36,19 +37,20 @@ class PinnedSlot:
 
 
 class PinnedBatchStaging:
-    def __init__(self, max_tokens: int, max_cu_seqlens_rows: int, device: torch.device):
+    def __init__(self, max_tokens: int, max_cu_seqlens_rows: int, device: torch.device,
+                 slots: int = PINNED_BATCH_SLOTS):
         pinned = lambda n, dtype: torch.empty(n, dtype=dtype, pin_memory=True)
         self.device = device
         self.slots = [PinnedSlot(pinned(max_tokens, torch.int32), pinned(max_tokens, torch.int64),
                                  pinned(max_cu_seqlens_rows, torch.int32), pinned(2 * max_tokens, torch.int32),
                                  torch.cuda.Event())
-                      for _ in range(PINNED_BATCH_SLOTS)]
+                      for _ in range(slots)]
         self.next_slot = 0
 
     def upload(self, inputs: Tensor, targets: Tensor, cum_seqlens: Tensor, ngram_ids: Tensor) -> tuple[Tensor, ...]:
         """Device copies of one batch's host tensors, through the next pinned slot."""
         slot = self.slots[self.next_slot]
-        self.next_slot = (self.next_slot + 1) % PINNED_BATCH_SLOTS
+        self.next_slot = (self.next_slot + 1) % len(self.slots)
         slot.uploaded.synchronize()
         out = []
         for host, buf in ((inputs, slot.inputs), (targets, slot.targets), (cum_seqlens, slot.cum_seqlens),
