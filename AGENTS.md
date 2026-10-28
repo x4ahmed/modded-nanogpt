@@ -57,7 +57,8 @@
 - RUN ONLY record_late (record counts + taper sampled at 24576): transferable upstream. matched* fix the port only; not run.
 - matched: stage P 10240/8192/(10240,10240,20480), keeping the record's negatives per set for 16384-token microbatches.
 - matched_late also samples the taper at 20480. Max distinct targets per microbatch measured 5197 (2026-10-25).
-- CPU tests pass locally (2026-10-25); GPU unverified. Smoke: python -u tests/check_rtx5090.py --sampled-schedule record_late.
+- CPU tests pass locally. GPU smoke --sampled-schedule record_late passed 2026-10-28 (user report).
+- Running seed 999 back to back in one allocation: record then record_late (same-session timing). Results pending.
 - Gated DeltaNet (experiment/gated-deltanet, 83fda24) five seeds: +0.0041098 loss (CI +0.0023..+0.0059), +8.17% time. Not promoted.
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
 - Finished, not promoted (5 seeds each, vs 3.2949 / 861.6 s): block AttnRes +0.036 / +10%; minimal AttnRes readout
