@@ -166,6 +166,7 @@ def main():
     # The forward reads the table at the row ids themselves (portable/tables.py): it IS the row cache.
     model.ngram_cache = ngram.table
     memory.mark("after_model_construction")
+    print0(f"VO_WHITENING per_head head_dim={model.vo_bank.whiten_head_dim}", console=True)
     model.quantize_attn_fp8()
     model.quantize_mlp_fp8(refresh_lm=True)
     prime_stage_cache()

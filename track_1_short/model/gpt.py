@@ -246,14 +246,17 @@ class GPT(nn.Module):
         self.qk_bank = nn.Parameter(torch.empty(num_qk_padded, 2 * head_dim, model_dim))
         self.qk_bank.reshape = (num_qk_padded, 2 * head_dim, model_dim)
 
-        # VO bank: per-layer ANVIL groups for V and O weights; slot j's V is matrix 2j, its O 2j + 1.
-        # V is stored [out = hdim, in = model_dim] and O [out = model_dim, in = hdim], both nn.Linear
-        # layout (record #360); the two shapes coincide because hdim == model_dim.
+        # VO bank: per-layer V and O weights; slot j's V is matrix 2j, its O 2j + 1. V is stored
+        # [out = hdim, in = model_dim] and O [out = model_dim, in = hdim], both nn.Linear layout
+        # (record #360); the two shapes coincide because hdim == model_dim.
         assert hdim == model_dim
         num_vo_real = 2 * num_slots  # 14
         num_vo_padded = next_multiple_of_n(num_vo_real, n=self.world_size)  # 16
         self.vo_bank = nn.Parameter(torch.empty(num_vo_padded, hdim, model_dim))
         self.vo_bank.reshape = (num_vo_padded, hdim, model_dim)
+        # ANVIL whitens V and O per attention head (optim/anvil.py vo_head_blocks), as qk_bank's groups do
+        # for Q and K: each head's V rows and O columns are their own matrix, not one 768 x 768 matrix.
+        self.vo_bank.whiten_head_dim = head_dim
 
         # improved init scale by @YouJiacheng and @srashedll. Every live row is drawn, including the
         # rows the narrower layers never read (record #360 does the same).

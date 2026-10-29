@@ -49,3 +49,9 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Per-head V/O whitening
+
+GPU: `python -u tests/check_rtx5090.py`; its output must include `VO_WHITENING per_head head_dim=128`.
+CPU: `python -m unittest discover -s tests -p test_vo_heads.py` (head-block mapping, equivalence to
+whitening each head alone, unchanged momentum; Triton replaced by torch matmuls). See `docs/vo-heads.md`.

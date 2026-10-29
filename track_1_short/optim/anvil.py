@@ -55,15 +55,46 @@ FROBENIUS_MARGIN, FROBENIUS_EPS = 1.05, 1e-6
 SPLIT_BADDBMM_MIN_ROWS = 1024
 
 
+def vo_head_blocks(X: Tensor, head_dim: int) -> Tensor:
+    """vo_bank matrices [C, hdim, dim] -> one wide [head_dim, dim] block per attention head, [C * H, head_dim, dim].
+
+    The bank alternates V (even index: [hdim, dim], head-major rows) and O (odd: [dim, hdim], head-major
+    columns), with hdim == dim. A V head is its rows; an O head is its columns, transposed so every block
+    has one shape (the polar factor of a transpose is the transpose of the polar factor). Block m * H + h
+    is head h of matrix m.
+    """
+    C, rows, cols = X.shape
+    assert C % 2 == 0 and rows == cols and rows % head_dim == 0, "whole V/O pairs of square matrices"
+    H = rows // head_dim
+    v = X[0::2].reshape(C // 2, H, head_dim, cols)
+    o = X[1::2].reshape(C // 2, rows, H, head_dim).permute(0, 2, 3, 1)
+    return torch.stack((v, o), dim=1).reshape(C * H, head_dim, cols)
+
+
+def vo_from_head_blocks(blocks: Tensor, head_dim: int) -> Tensor:
+    """The inverse of vo_head_blocks: [C * H, head_dim, dim] -> [C, hdim, dim] V/O matrices."""
+    dim = blocks.size(-1)
+    H = dim // head_dim
+    C = blocks.size(0) // H
+    pairs = blocks.reshape(C // 2, 2, H, head_dim, dim)
+    v = pairs[:, 0].reshape(C // 2, H * head_dim, dim)
+    o = pairs[:, 1].permute(0, 3, 1, 2).reshape(C // 2, dim, H * head_dim)
+    return torch.stack((v, o), dim=1).reshape(C, H * head_dim, dim)
+
+
 @torch.compile(dynamic=False, fullgraph=True) # Must use dynamic=False or else it's much slower
 def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: torch.Tensor,
-                  split_baddbmm: bool, fast_beta_t: torch.Tensor, fast_weight_t: torch.Tensor):
+                  split_baddbmm: bool, fast_beta_t: torch.Tensor, fast_weight_t: torch.Tensor,
+                  head_dim: int | None = None):
     """Twin-rail Nesterov momentum, then the ANVIL cascade that drives every singular value to ~1.
 
     velocity is one fp32 [2, *chunk] tensor: rail 0 fast, rail 1 slow. Their blend gets a Nesterov
     lookahead (momentum_t), is cast to bf16, normalized by its Frobenius norm, and whitened by
     ANVIL_MAPS. momentum_t, fast_beta_t and fast_weight_t are 0-D device tensors (AnvilBank), so
     per-step changes never recompile and a captured graph reads their current values.
+
+    head_dim (vo_bank): normalize and whiten each attention head's block (vo_head_blocks) as its own
+    matrix instead of each whole matrix. The momentum is elementwise, so only the whitening changes.
     """
     grad_chunk = grad_chunk.float()
     momentum = momentum_t.to(grad_chunk.dtype)
@@ -73,8 +104,11 @@ def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: 
     blend = w * velocity[0] + (1 - w) * velocity[1]
     g = grad_chunk.lerp_(blend, momentum)
 
-    X = g.bfloat16().contiguous()
-    is_tall = g.size(-2) > g.size(-1)
+    X = g.bfloat16()
+    if head_dim is not None:
+        X = vo_head_blocks(X, head_dim)
+    X = X.contiguous()
+    is_tall = X.size(-2) > X.size(-1)
 
     # The first Gram is taken on the unnormalized X: its trace is ||X||_F^2, which gives the
     # normalization for free; X and the Gram are then rescaled instead of recomputing.
@@ -141,6 +175,8 @@ def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: 
 
             X, C = C, X  # Swap references to avoid unnecessary copies
 
+    if head_dim is not None:
+        X = vo_from_head_blocks(X, head_dim)
     return X
 
 # -----------------------------------------------------------------------------
@@ -190,6 +226,7 @@ class AnvilBank:
     beta2: float          # the equalizer's EMA decay
     split_baddbmm: bool
     red_dim: int
+    whiten_head_dim: int | None  # vo_bank: whiten per attention head (vo_head_blocks); None: whole matrices
 
     def mutated(self) -> dict[str, Tensor]:
         """What the update writes."""
@@ -210,6 +247,7 @@ class AnvilAndAdam:
       (https://arxiv.org/pdf/2510.05491)
     - Cautious weight decay gated on the slow rail's sign
     - Mantissa tracking for precision
+    - V and O whitened per attention head (vo_head_blocks), as Q and K are per head pair
 
     Adam (for embeddings/scalars/gates):
     - Standard Adam with bias correction
@@ -416,6 +454,10 @@ class AnvilAndAdam:
             # bf16, so anvil_cascade's grad.float() is a copy and its in-place lerp never writes `grad`.
             assert param.dtype == torch.bfloat16, f"{cfg.label} must be bf16 before the optimizer is built"
             chunk_shape = (cfg.chunk_size, *cfg.reshape[1:])
+            # A parameter marks per-head whitening (the model's vo_bank); it pairs each V with its O, so
+            # this rank's slice must hold whole pairs.
+            head_dim = getattr(param, "whiten_head_dim", None)
+            assert head_dim is None or cfg.chunk_size % 2 == 0, f"{cfg.label}: per-head whitening needs whole V/O pairs"
             self.banks[cfg.label] = AnvilBank(
                 label=cfg.label,
                 grad=torch.empty(chunk_shape, dtype=param.dtype, device=device),
@@ -425,6 +467,7 @@ class AnvilAndAdam:
                 beta2=cfg.beta2,
                 split_baddbmm=chunk_shape[-2] > SPLIT_BADDBMM_MIN_ROWS,
                 red_dim=-1 if chunk_shape[-2] >= chunk_shape[-1] else -2,
+                whiten_head_dim=head_dim,
             )
 
     def live_bank_state(self, label: str) -> dict[str, Tensor]:
@@ -791,6 +834,7 @@ def anvil_bank_update(bank: AnvilBank):
         bank.grad, bank.velocity, bank.momentum,
         split_baddbmm=bank.split_baddbmm,
         fast_beta_t=bank.fast_beta, fast_weight_t=bank.fast_weight,
+        head_dim=bank.whiten_head_dim,
     )
     # 2. Equalize per-lane update energy
     v_chunk = AnvilAndAdam._rail_equalizer(v_chunk, bank.lane_energy, bank.beta2, bank.red_dim)
