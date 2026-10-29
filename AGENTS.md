@@ -16,7 +16,7 @@
 ## Goal and repository
 - Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
 - Frozen local branch: baseline (5be1ba0); active: experiment/vo-heads, branched from baseline.
-- experiment/attention-residuals (block AttnRes) is finished and not promoted; future experiments branch from baseline.
+- Every idea gets its own branch from baseline and is tested alone; never merge or stack wins (user, 2026-10-30).
 - Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
 - Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
@@ -58,7 +58,7 @@
 - Value upstream: record prices val at ~164 ms/millinat; screen seed 999 vs baseline 3.294980/3.295181/3.295634, needs < -0.002.
 - Log line VO_WHITENING; W&B vo-heads-1gpu-seed-<seed>. 2026-10-30: CPU suite passes; 5090 smoke + seed 999 pending.
 - experiment/async-uploads (port-only host-sync fix), pair 2026-10-29: -14.15 s (-1.71%), loss unchanged. WIN;
-  merge into baseline awaits the user's OK. This branch predates it, so its time compares to the old baseline.
+  kept on its own branch (not merged). It does not transfer: the 8xH100 record already uploads this way.
 - Sampled-softmax record_late (experiment/sampled-softmax-schedule), seed-999 pair: +0.0064 loss, -1.7 s. Stopped.
 - Gated DeltaNet (experiment/gated-deltanet, 83fda24) five seeds: +0.0041098 loss (CI +0.0023..+0.0059), +8.17% time. Not promoted.
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
