@@ -56,9 +56,10 @@
 - Active: async uploads (port-only systems fix): same kernels, values and order; only host waits change.
 - Candidate-set H2Ds: 4 pinned slots, non_blocking (portable/sampled.py). A blocking pageable copy_ syncs the stream.
 - Batch ring 16 -> portable/config.py BATCH_STAGING_SLOTS (48): 24/20-microbatch steps no longer drain the GPU.
-- Expect ~8-12 s faster, loss unchanged. Log line ASYNC_UPLOADS; W&B async-uploads-1gpu-seed-<seed>. docs/async-uploads.md.
-- Screen: seed 999, baseline branch then this branch, one allocation. Win: time drops > ~5 s, loss within ±0.002.
-- 2026-10-28: CPU suite (29 tests) passes; local RTX 3050 check of prepare() exact under host run-ahead. 5090 smoke + pair pending.
+- Log line ASYNC_UPLOADS; W&B async-uploads-1gpu-seed-<seed>. docs/async-uploads.md. CPU suite (29 tests) passes.
+- Pair 2026-10-29 (tujestpolin, seed 999, one allocation): baseline 3.295634 / 825.546 s; async 3.295201 / 811.392 s.
+- Result: -14.15 s (-1.71%), loss -0.0004 (noise). WIN (screen: > 5 s faster, loss within ±0.002). Port-only.
+- Next: merge into baseline only on the user's OK (baseline is frozen); experiment/vo-heads branched before it.
 - Sampled-softmax record_late (experiment/sampled-softmax-schedule), seed-999 pair: +0.0064 loss, -1.7 s. Stopped.
 - Gated DeltaNet (experiment/gated-deltanet, 83fda24) five seeds: +0.0041098 loss (CI +0.0023..+0.0059), +8.17% time. Not promoted.
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
