@@ -16,7 +16,7 @@
 ## Goal and repository
 - Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
 - Frozen local branch: baseline (5be1ba0); active: experiment/async-uploads, branched from baseline.
-- experiment/attention-residuals (block AttnRes) is finished and not promoted; future experiments branch from baseline.
+- Every idea gets its own branch from baseline and is tested alone; never merge or stack wins (user, 2026-10-30).
 - Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
 - Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
@@ -59,7 +59,8 @@
 - Log line ASYNC_UPLOADS; W&B async-uploads-1gpu-seed-<seed>. docs/async-uploads.md. CPU suite (29 tests) passes.
 - Pair 2026-10-29 (tujestpolin, seed 999, one allocation): baseline 3.295634 / 825.546 s; async 3.295201 / 811.392 s.
 - Result: -14.15 s (-1.71%), loss -0.0004 (noise). WIN (screen: > 5 s faster, loss within ±0.002). Port-only.
-- Next: merge into baseline only on the user's OK (baseline is frozen); experiment/vo-heads branched before it.
+- Kept on this branch, not merged (user, 2026-10-30). No upstream transfer: the 8xH100 record already uploads
+  candidates from pinned slots on a copy stream and loads one batch per rank per step (its 16 slots never wrap).
 - Sampled-softmax record_late (experiment/sampled-softmax-schedule), seed-999 pair: +0.0064 loss, -1.7 s. Stopped.
 - Gated DeltaNet (experiment/gated-deltanet, 83fda24) five seeds: +0.0041098 loss (CI +0.0023..+0.0059), +8.17% time. Not promoted.
 - Screening rule (2026-10-22): one seed per idea; five seeds only if it beats 3.2949. W&B deltanet-l5-1gpu-seed-<seed>.
