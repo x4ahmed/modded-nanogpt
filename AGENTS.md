@@ -56,7 +56,7 @@
 - Active: per-head V/O whitening (optimizer only, transferable upstream). ANVIL whitens each head's V rows and O
   columns as their own matrix (optim/anvil.py vo_head_blocks); Q/K/MLP banks bitwise unchanged. docs/vo-heads.md.
 - Value upstream: record prices val at ~164 ms/millinat; screen seed 999 vs baseline 3.294980/3.295181/3.295634, needs < -0.002.
-- Log line VO_WHITENING; W&B vo-heads-1gpu-seed-<seed>. 2026-10-30: CPU suite passes; 5090 smoke + seed 999 pending.
+- Log line VO_WHITENING; W&B vo-heads-1gpu-seed-<seed>. 2026-10-30: CPU suite passes; 5090 smoke passed (user report); seed 999 running.
 - experiment/async-uploads (port-only host-sync fix), pair 2026-10-29: -14.15 s (-1.71%), loss unchanged. WIN;
   kept on its own branch (not merged). It does not transfer: the 8xH100 record already uploads this way.
 - Sampled-softmax record_late (experiment/sampled-softmax-schedule), seed-999 pair: +0.0064 loss, -1.7 s. Stopped.
