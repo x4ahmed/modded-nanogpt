@@ -8,6 +8,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export PORTABLE=1
+export ANVIL_MLP_WHITENING="${ANVIL_MLP_WHITENING:-gram_pair}"
+case "$ANVIL_MLP_WHITENING" in
+    gram_pair) run_prefix=gram-ns-mlp ;;
+    standard) run_prefix=baseline ;;
+    *) echo "ANVIL_MLP_WHITENING must be standard or gram_pair" >&2; exit 2 ;;
+esac
 # Capture the launch commit before training, never infer it at upload time.
 training_commit=$(git rev-parse HEAD 2>/dev/null || true)
 mkdir -p logs
@@ -20,7 +26,7 @@ if [[ "${RTX_WANDB_UPLOAD:-1}" == "1" && "${RTX_PREFLIGHT:-0}" != "1" ]]; then
     upload_args=("$console_log" --entity i-learn --project speedrun)
     [[ -z "${TRAIN_SEED:-}" ]] || upload_args+=(--seed "$TRAIN_SEED")
     [[ -z "$training_commit" ]] || upload_args+=(--training-commit "$training_commit")
-    upload_args+=(--name "baseline-1gpu-seed-${TRAIN_SEED:-unseeded}")
+    upload_args+=(--name "${run_prefix}-1gpu-seed-${TRAIN_SEED:-unseeded}")
     echo "Training finished. Uploading recorded metrics to i-learn/speedrun."
     if ! "$upload_python" tools/upload_wandb.py "${upload_args[@]}"; then
         echo "WARNING: training succeeded but W&B upload failed. Local results are safe: $console_log" >&2

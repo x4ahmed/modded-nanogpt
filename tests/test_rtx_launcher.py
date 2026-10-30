@@ -26,7 +26,7 @@ class LauncherTests(unittest.TestCase):
             record = root / "upload.txt"
             env = dict(os.environ, BASH_ENV=hook.as_posix(), TEST_RECORD=record.as_posix(),
                        WANDB_UPLOAD_PYTHON="fake_upload", RTX_WANDB_UPLOAD="1",
-                       RTX_PREFLIGHT="0", TRAIN_SEED="999")
+                       RTX_PREFLIGHT="0", TRAIN_SEED="999", ANVIL_MLP_WHITENING="gram_pair")
             env.update(overrides)
             result = subprocess.run([BASH, "run_rtx.sh"], cwd=root, env=env,
                                     capture_output=True, text=True, timeout=30)
@@ -46,17 +46,29 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertIsNone(args)
 
-    def test_names_follow_each_baseline_seed(self):
+    def test_names_follow_each_experiment_seed(self):
         for seed in (999, 1000, 1001, 1002, 1003):
             with self.subTest(seed=seed):
                 result, args, _ = self.launch(TRAIN_SEED=str(seed))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
+                self.assertIn(f"--name\ngram-ns-mlp-1gpu-seed-{seed}\n", args)
+
+    def test_standard_control_name(self):
+        result, args, _ = self.launch(ANVIL_MLP_WHITENING="standard")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--name\nbaseline-1gpu-seed-999\n", args)
+
+    def test_invalid_optimizer_mode_stops_before_training(self):
+        result, args, count = self.launch(ANVIL_MLP_WHITENING="typo")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("FAKE TRAINING", result.stdout)
+        self.assertIsNone(args)
+        self.assertEqual(count, 0)
 
     def test_missing_seed_is_not_mislabeled(self):
         result, args, _ = self.launch(TRAIN_SEED="")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--name\nbaseline-1gpu-seed-unseeded\n", args)
+        self.assertIn("--name\ngram-ns-mlp-1gpu-seed-unseeded\n", args)
         self.assertNotIn("--seed\n", args)
 
     def test_preflight_and_optout_skip_upload(self):

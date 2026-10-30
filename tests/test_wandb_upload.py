@@ -23,6 +23,21 @@ LOG = HEADER + "\n" + "\n".join([
 
 
 class UploadTests(unittest.TestCase):
+    def test_whitening_metadata_comes_from_log(self):
+        for mode, interval in (("standard", 1), ("gram_pair", 2)):
+            line = f"MLP_WHITENING mode={mode} dtype=bf16 maps=6 gram_refresh_interval={interval}"
+            result = module.parse_log(LOG.replace(HEADER, HEADER + "\n" + line))
+            self.assertEqual(result["config"]["mlp_whitening"], mode)
+            self.assertEqual(result["config"]["gram_refresh_interval"], interval)
+        self.assertNotIn("mlp_whitening", module.parse_log(LOG)["config"])
+
+    def test_invalid_whitening_metadata_is_rejected(self):
+        good = "MLP_WHITENING mode=gram_pair dtype=bf16 maps=6 gram_refresh_interval=2"
+        for line in (good + "\n" + good, good.replace("interval=2", "interval=1"),
+                     good.replace("mode=gram_pair", "mode=typo")):
+            with self.assertRaises(ValueError):
+                module.parse_log(LOG.replace(HEADER, HEADER + "\n" + line))
+
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)
         self.assertEqual(len(result["history"]), 2)

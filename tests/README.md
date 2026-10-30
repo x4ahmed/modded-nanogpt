@@ -1,5 +1,18 @@
 # RTX 5090 diagnostics
 
+## Current experiment: MLP Gram Newton–Schulz
+
+Run `python -u tests/check_gram_ns.py`, then
+`python -u tests/check_rtx5090.py --mlp-whitening gram_pair` if it passes.
+The first test checks kernel parity, numerical stress cases, optimizer graph
+replay/reset, frozen slots and complete bank-update timings for 3 and 24 matrices.
+It needs no dataset and writes `logs/check-gram-ns-*.txt` immediately.
+Three matrices simulate a rank's local H100 workload, not eight-GPU communication.
+`--mlp-whitening standard` selects the unchanged control in the training smoke test.
+See [experiment settings and interpretation](../docs/gram-ns-mlp.md).
+
+## Port diagnostics
+
 Inside a Slurm allocation with one RTX 5090 and the training venv active:
 
 ```bash

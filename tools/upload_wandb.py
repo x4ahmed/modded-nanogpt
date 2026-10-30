@@ -42,6 +42,17 @@ def parse_log(text):
     summary = {"canonical_mask_fallback": False}
     previous = -1
     for line in lines[start + 1:]:
+        match = re.fullmatch(r"MLP_WHITENING mode=(standard|gram_pair) dtype=bf16 maps=6 gram_refresh_interval=([12])", line)
+        if match:
+            if "mlp_whitening" in config:
+                raise ValueError("Duplicate MLP whitening metadata.")
+            mode, interval = match.groups()
+            if int(interval) != (2 if mode == "gram_pair" else 1):
+                raise ValueError("Inconsistent MLP whitening metadata.")
+            config.update(mlp_whitening=mode, whitening_dtype="bf16", whitening_maps=6,
+                          gram_refresh_interval=int(interval))
+        elif line.startswith("MLP_WHITENING "):
+            raise ValueError("Malformed MLP whitening metadata.")
         if line.startswith("rtx-local-v2:"):
             raise ValueError("Multiple run headers: provide a single run log.")
         match = STEP.fullmatch(line)

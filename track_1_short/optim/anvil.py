@@ -7,7 +7,10 @@ import torch
 import torch.distributed as dist
 from torch import Tensor, nn
 
+from track_1_short.config import MLP_WHITENING
+from track_1_short.optim.gram_newton_schulz import gram_pair_cascade
 from track_1_short.perf.bank_scalars import BankScalarStaging
+from track_1_short.perf.kernels.gram_product import sym_product
 from track_1_short.perf.kernels.polar_express import XTX, XXT, ba_plus_cAA
 from track_1_short.perf.kernels.transpose import transpose_add, transpose_copy
 from track_1_short.perf.replicated_adam import ReplicatedAdam
@@ -57,7 +60,8 @@ SPLIT_BADDBMM_MIN_ROWS = 1024
 
 @torch.compile(dynamic=False, fullgraph=True) # Must use dynamic=False or else it's much slower
 def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: torch.Tensor,
-                  split_baddbmm: bool, fast_beta_t: torch.Tensor, fast_weight_t: torch.Tensor):
+                  split_baddbmm: bool, fast_beta_t: torch.Tensor, fast_weight_t: torch.Tensor,
+                  gram_pairs: bool = False):
     """Twin-rail Nesterov momentum, then the ANVIL cascade that drives every singular value to ~1.
 
     velocity is one fp32 [2, *chunk] tensor: rail 0 fast, rail 1 slow. Their blend gets a Nesterov
@@ -75,6 +79,7 @@ def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: 
 
     X = g.bfloat16().contiguous()
     is_tall = g.size(-2) > g.size(-1)
+    assert not gram_pairs or is_tall, "Gram pairs are only enabled for tall MLP matrices"
 
     # The first Gram is taken on the unnormalized X: its trace is ||X||_F^2, which gives the
     # normalization for free; X and the Gram are then rescaled instead of recomputing.
@@ -86,6 +91,8 @@ def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: 
         d = tr.sqrt() * FROBENIUS_MARGIN + FROBENIUS_EPS
         X = (X.float() / d).bfloat16()
         A = (A.float() / d.square()).bfloat16()
+        if gram_pairs:
+            return gram_pair_cascade(X, A, ANVIL_MAPS, gram_out=XTX, sym_product_out=sym_product)
         B = torch.empty_like(A)
         C = torch.empty_like(X)
 
@@ -190,6 +197,7 @@ class AnvilBank:
     beta2: float          # the equalizer's EMA decay
     split_baddbmm: bool
     red_dim: int
+    gram_pairs: bool = False  # MLP only; fixed before compilation/graph capture
 
     def mutated(self) -> dict[str, Tensor]:
         """What the update writes."""
@@ -425,6 +433,7 @@ class AnvilAndAdam:
                 beta2=cfg.beta2,
                 split_baddbmm=chunk_shape[-2] > SPLIT_BADDBMM_MIN_ROWS,
                 red_dim=-1 if chunk_shape[-2] >= chunk_shape[-1] else -2,
+                gram_pairs=cfg.label == "mlp_bank" and MLP_WHITENING == "gram_pair",
             )
 
     def live_bank_state(self, label: str) -> dict[str, Tensor]:
@@ -791,6 +800,7 @@ def anvil_bank_update(bank: AnvilBank):
         bank.grad, bank.velocity, bank.momentum,
         split_baddbmm=bank.split_baddbmm,
         fast_beta_t=bank.fast_beta, fast_weight_t=bank.fast_weight,
+        gram_pairs=bank.gram_pairs,
     )
     # 2. Equalize per-lane update energy
     v_chunk = AnvilAndAdam._rail_equalizer(v_chunk, bank.lane_energy, bank.beta2, bank.red_dim)

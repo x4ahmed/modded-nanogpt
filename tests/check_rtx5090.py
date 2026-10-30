@@ -39,6 +39,7 @@ def configure(args):
         if key.startswith("RTX_"):
             del os.environ[key]
     os.environ.pop("NUM_SCHEDULED_ITERATIONS", None)
+    os.environ["ANVIL_MLP_WHITENING"] = args.mlp_whitening
     os.environ.update(PORTABLE="1", TRAIN_SEED=str(args.seed), RTX_MAX_STEPS="2",
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
@@ -59,7 +60,7 @@ def run_check(args):
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
         print(f"{' '.join(command)}: {result.stdout.strip() or result.stderr.strip() or 'clean'}")
     print("SETTINGS " + " ".join(f"{k}={v}" for k, v in sorted(os.environ.items())
-                                  if k.startswith("RTX_") or k in ("TRAIN_SEED", "DATA_PATH", "PORTABLE")))
+                                  if k.startswith("RTX_") or k in ("TRAIN_SEED", "DATA_PATH", "PORTABLE", "ANVIL_MLP_WHITENING")))
     print("Diagnostic run only. Timings include numerical checks. Compilation may take several minutes.")
 
     # The trainer snapshots its entry script and package relative to that script.
@@ -183,6 +184,7 @@ def run_check(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
+    parser.add_argument("--mlp-whitening", choices=("standard", "gram_pair"), default="gram_pair")
     parser.add_argument("--val-seq-len", type=int, choices=(65536, 262144), default=65536,
                         help="Diagnostic validation packing; default 65536, not a frozen baseline.")
     args = parser.parse_args()

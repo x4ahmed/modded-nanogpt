@@ -1,6 +1,7 @@
 """Run configuration: hyperparameters and the training-stage table.
 
-The run's own environment variables (DATA_PATH, NUM_SCHEDULED_ITERATIONS, TRAIN_SEED) are read here.
+The run's own environment variables (DATA_PATH, NUM_SCHEDULED_ITERATIONS, TRAIN_SEED,
+ANVIL_MLP_WHITENING) are read here.
 The others: torchrun's RANK / LOCAL_RANK / WORLD_SIZE (distributed.py; train_gpt.py also reads
 LOCAL_RANK), PYTORCH_ALLOC_CONF (set by train_gpt.py), and CUDA_HOME (perf/kernels/cross_entropy.py,
 for the CE kernel's CUDA headers).
@@ -11,6 +12,11 @@ cap, 52 growth steps) is record #360's.
 import os
 import uuid
 from dataclasses import dataclass
+
+# Shared by RTX and the distributed trainer. Set before launch, never mid-run.
+MLP_WHITENING = os.environ.get("ANVIL_MLP_WHITENING", "gram_pair")
+if MLP_WHITENING not in ("standard", "gram_pair"):
+    raise ValueError("ANVIL_MLP_WHITENING must be standard or gram_pair")
 
 @dataclass(slots=True)
 class Hyperparameters:

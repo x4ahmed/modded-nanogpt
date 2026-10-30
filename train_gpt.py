@@ -33,6 +33,7 @@ from torch import nn
 from track_1_short.canonical_mask import BackgroundCanonicalMask
 from track_1_short.config import (
     LR_COOLDOWN_FRAC,
+    MLP_WHITENING,
     SPLIT_EMBED_STAGE,
     TRAINING_STAGES,
     WS_POST_YARN_EXT,
@@ -142,6 +143,8 @@ def main():
 
     print0, flush_log = start_run_log(env.master_process, args.run_id)
     log_environment(print0, code)
+    print0(f"MLP_WHITENING mode={MLP_WHITENING} dtype=bf16 maps=6 "
+           f"gram_refresh_interval={2 if MLP_WHITENING == 'gram_pair' else 1}", console=True)
     flush_log()
 
     ########################################
