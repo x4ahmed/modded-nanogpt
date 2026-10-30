@@ -49,10 +49,11 @@
 - Full runs: warmup ~95 s untimed; peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
 
 ## Open issue and next steps
-- Active: whole-matrix Q/K whitening (optimizer only, transferable). ANVIL whitens each layer's whole Q and K
-  (3 head-pair groups stacked, anvil_cascade merge_groups); momentum/equalizer stay per group. docs/qk-whole.md.
-- Screen seed 999 vs baseline seed-999 runs 3.294980/3.295181/3.295634: win needs < ~3.2933. Log QK_WHITENING;
-  W&B qk-whole-1gpu-seed-<seed>. 2026-10-30: CPU suite passes; 5090 smoke + seed 999 pending.
+- Whole-matrix Q/K whitening (this branch, optimizer only): ANVIL whitens each layer's whole Q and K (3 head-pair
+  groups stacked, anvil_cascade merge_groups); momentum/equalizer per group. docs/qk-whole.md. W&B qk-whole-...
+- Seed 999 (2026-10-30, tujestpolin): 3.294659 / 825.989 s vs baseline seed-999 runs 3.294980/3.295181/3.295634.
+- Result: -0.0006 vs their mean, within ±0.002 (neutral); time +0.4 s vs 825.5 s same machine (noise).
+  Five seeds could not resolve < ~0.002; even -0.0006 is worth ~0.1 s upstream. Pending user decision.
 - experiment/vo-heads (per-head V/O whitening): seed 999 3.307629, +0.0124 loss. STOPPED. Coarser whitening wins there.
 - experiment/gram-ns-mlp (Gram NS for MLP whitening, other agent's branch): diagnostic pass; bank 21% faster on the
   5090 (2.2 s/run), ~5% at H100 per-GPU size (<= 0.08 s/run). Not worth it upstream; training run not done.
