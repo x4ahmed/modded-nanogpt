@@ -53,7 +53,9 @@
   interleaved whole-bank timing. Batch 3 simulates local H100 shard shape, without collectives; batch 24 is RTX.
 - 5090 run 2026-10-30: kernel parity and cascade numerics pass (gaussian 0.97%, ill-conditioned 1.1%, rank-8 32%
   vs standard); batch 3 graph replay pass, bank 1.285 -> 1.222 ms (0.95). Batch 24 hit dynamo's recompile limit 8
-  (script mixed grad modes); script now runs under no_grad with limit 64, as the trainers. Rerun pending.
+  (script mixed grad modes); fixed (8b8a1bd: no_grad, limit 64, as the trainers).
+- Rerun 2026-10-30: GRAM_NS_CHECK pass. Bank 24: 8.872 -> 7.023 ms (0.79) = 2.2 s/run on the 5090 (0.27%).
+  Bank 3 (H100 per-GPU count, measured on the 5090): 0.95 = ~0.08 s/run at most; ~0.5 millinat at 164 ms/millinat.
 
 ## Open issue and next steps
 - Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
