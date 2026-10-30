@@ -20,7 +20,7 @@ if [[ "${RTX_WANDB_UPLOAD:-1}" == "1" && "${RTX_PREFLIGHT:-0}" != "1" ]]; then
     upload_args=("$console_log" --entity i-learn --project speedrun)
     [[ -z "${TRAIN_SEED:-}" ]] || upload_args+=(--seed "$TRAIN_SEED")
     [[ -z "$training_commit" ]] || upload_args+=(--training-commit "$training_commit")
-    upload_args+=(--name "baseline-1gpu-seed-${TRAIN_SEED:-unseeded}")
+    upload_args+=(--name "qk-whole-1gpu-seed-${TRAIN_SEED:-unseeded}")
     echo "Training finished. Uploading recorded metrics to i-learn/speedrun."
     if ! "$upload_python" tools/upload_wandb.py "${upload_args[@]}"; then
         echo "WARNING: training succeeded but W&B upload failed. Local results are safe: $console_log" >&2

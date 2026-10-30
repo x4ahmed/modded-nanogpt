@@ -49,3 +49,9 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Whole-matrix Q/K whitening
+
+GPU: `python -u tests/check_rtx5090.py`; its output must include `QK_WHITENING whole_matrix groups_per_matrix=3`.
+CPU: `python -m unittest discover -s tests -p test_qk_whole.py` (grouping, equivalence to whitening each
+whole Q/K alone, unchanged momentum; Triton replaced by torch matmuls). See `docs/qk-whole.md`.

@@ -57,13 +57,18 @@ SPLIT_BADDBMM_MIN_ROWS = 1024
 
 @torch.compile(dynamic=False, fullgraph=True) # Must use dynamic=False or else it's much slower
 def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: torch.Tensor,
-                  split_baddbmm: bool, fast_beta_t: torch.Tensor, fast_weight_t: torch.Tensor):
+                  split_baddbmm: bool, fast_beta_t: torch.Tensor, fast_weight_t: torch.Tensor,
+                  merge_groups: int = 1):
     """Twin-rail Nesterov momentum, then the ANVIL cascade that drives every singular value to ~1.
 
     velocity is one fp32 [2, *chunk] tensor: rail 0 fast, rail 1 slow. Their blend gets a Nesterov
     lookahead (momentum_t), is cast to bf16, normalized by its Frobenius norm, and whitened by
     ANVIL_MAPS. momentum_t, fast_beta_t and fast_weight_t are 0-D device tensors (AnvilBank), so
     per-step changes never recompile and a captured graph reads their current values.
+
+    merge_groups (qk_bank): normalize and whiten each run of this many consecutive matrices as one
+    matrix, stacked along its rows (a layer's whole Q or K from its head-pair groups). The momentum
+    is elementwise, so only the whitening changes.
     """
     grad_chunk = grad_chunk.float()
     momentum = momentum_t.to(grad_chunk.dtype)
@@ -73,8 +78,12 @@ def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: 
     blend = w * velocity[0] + (1 - w) * velocity[1]
     g = grad_chunk.lerp_(blend, momentum)
 
-    X = g.bfloat16().contiguous()
-    is_tall = g.size(-2) > g.size(-1)
+    X = g.bfloat16()
+    if merge_groups > 1:
+        assert g.size(0) % merge_groups == 0, "whole runs of groups"
+        X = X.reshape(g.size(0) // merge_groups, merge_groups * g.size(-2), g.size(-1))
+    X = X.contiguous()
+    is_tall = X.size(-2) > X.size(-1)
 
     # The first Gram is taken on the unnormalized X: its trace is ||X||_F^2, which gives the
     # normalization for free; X and the Gram are then rescaled instead of recomputing.
@@ -141,6 +150,8 @@ def anvil_cascade(grad_chunk: torch.Tensor, velocity: torch.Tensor, momentum_t: 
 
             X, C = C, X  # Swap references to avoid unnecessary copies
 
+    if merge_groups > 1:
+        X = X.reshape(g.shape)
     return X
 
 # -----------------------------------------------------------------------------
@@ -190,6 +201,7 @@ class AnvilBank:
     beta2: float          # the equalizer's EMA decay
     split_baddbmm: bool
     red_dim: int
+    whiten_merge: int     # qk_bank: consecutive groups whitened as one matrix (anvil_cascade); 1: each alone
 
     def mutated(self) -> dict[str, Tensor]:
         """What the update writes."""
@@ -210,6 +222,7 @@ class AnvilAndAdam:
       (https://arxiv.org/pdf/2510.05491)
     - Cautious weight decay gated on the slow rail's sign
     - Mantissa tracking for precision
+    - Q and K whitened as each layer's whole matrices (merge_groups), as V and O are
 
     Adam (for embeddings/scalars/gates):
     - Standard Adam with bias correction
@@ -416,6 +429,10 @@ class AnvilAndAdam:
             # bf16, so anvil_cascade's grad.float() is a copy and its in-place lerp never writes `grad`.
             assert param.dtype == torch.bfloat16, f"{cfg.label} must be bf16 before the optimizer is built"
             chunk_shape = (cfg.chunk_size, *cfg.reshape[1:])
+            # A parameter marks merged whitening (the model's qk_bank: a layer's whole Q or K), so this
+            # rank's slice must hold whole runs of groups.
+            merge = getattr(param, "whiten_merge", 1)
+            assert cfg.chunk_size % merge == 0, f"{cfg.label}: merged whitening needs whole runs of {merge} groups"
             self.banks[cfg.label] = AnvilBank(
                 label=cfg.label,
                 grad=torch.empty(chunk_shape, dtype=param.dtype, device=device),
@@ -425,6 +442,7 @@ class AnvilAndAdam:
                 beta2=cfg.beta2,
                 split_baddbmm=chunk_shape[-2] > SPLIT_BADDBMM_MIN_ROWS,
                 red_dim=-1 if chunk_shape[-2] >= chunk_shape[-1] else -2,
+                whiten_merge=merge,
             )
 
     def live_bank_state(self, label: str) -> dict[str, Tensor]:
@@ -791,6 +809,7 @@ def anvil_bank_update(bank: AnvilBank):
         bank.grad, bank.velocity, bank.momentum,
         split_baddbmm=bank.split_baddbmm,
         fast_beta_t=bank.fast_beta, fast_weight_t=bank.fast_weight,
+        merge_groups=bank.whiten_merge,
     )
     # 2. Equalize per-lane update energy
     v_chunk = AnvilAndAdam._rail_equalizer(v_chunk, bank.lane_energy, bank.beta2, bank.red_dim)

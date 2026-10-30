@@ -236,15 +236,19 @@ class GPT(nn.Module):
         num_slots = len(ATTN_BANK_ORDER)
         hdim = num_heads * head_dim
 
-        # QK bank: per-head-pair ANVIL groups for Q, K weights. Each pair of adjacent heads gets its
-        # own independent whitening: a slot's 2 * num_heads heads (Q heads, then K heads) are
-        # num_heads groups of two full-width heads.
+        # QK bank: per-head-pair ANVIL groups for Q, K weights: a slot's 2 * num_heads heads (Q heads,
+        # then K heads) are num_heads groups of two full-width heads.
         qk_groups_per_slot = num_heads
         num_qk_groups = num_slots * qk_groups_per_slot  # 42
         self._num_qk_groups = num_qk_groups
         num_qk_padded = next_multiple_of_n(num_qk_groups, n=self.world_size)  # 48
         self.qk_bank = nn.Parameter(torch.empty(num_qk_padded, 2 * head_dim, model_dim))
         self.qk_bank.reshape = (num_qk_padded, 2 * head_dim, model_dim)
+        # ANVIL whitens each layer's whole Q and whole K as one 768 x 768 matrix (its num_heads // 2
+        # head-pair groups stacked; optim/anvil.py), as it does V and O. Momentum and the lane
+        # equalizer stay per group.
+        assert num_heads % 2 == 0
+        self.qk_bank.whiten_merge = num_heads // 2
 
         # VO bank: per-layer ANVIL groups for V and O weights; slot j's V is matrix 2j, its O 2j + 1.
         # V is stored [out = hdim, in = model_dim] and O [out = model_dim, in = hdim], both nn.Linear

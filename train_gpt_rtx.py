@@ -166,6 +166,7 @@ def main():
     # The forward reads the table at the row ids themselves (portable/tables.py): it IS the row cache.
     model.ngram_cache = ngram.table
     memory.mark("after_model_construction")
+    print0(f"QK_WHITENING whole_matrix groups_per_matrix={model.qk_bank.whiten_merge}", console=True)
     model.quantize_attn_fp8()
     model.quantize_mlp_fp8(refresh_lm=True)
     prime_stage_cache()
