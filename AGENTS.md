@@ -51,6 +51,9 @@
   kernel tests bypassed that launcher limitation. RTX 5090/8xH100 runtime and convergence are NOT validated.
 - tests/check_gram_ns.py exercises full-size numerical cases, graph replay/reset/scalars, frozen slots and
   interleaved whole-bank timing. Batch 3 simulates local H100 shard shape, without collectives; batch 24 is RTX.
+- 5090 run 2026-10-30: kernel parity and cascade numerics pass (gaussian 0.97%, ill-conditioned 1.1%, rank-8 32%
+  vs standard); batch 3 graph replay pass, bank 1.285 -> 1.222 ms (0.95). Batch 24 hit dynamo's recompile limit 8
+  (script mixed grad modes); script now runs under no_grad with limit 64, as the trainers. Rerun pending.
 
 ## Open issue and next steps
 - Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.

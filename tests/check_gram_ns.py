@@ -22,6 +22,11 @@ from check_rtx5090 import Tee
 
 def run_checks(args):
     import torch
+    import torch._dynamo
+    # As in the trainers: their recompile limit (train_gpt_rtx.py), and no autograd, since the optimizer
+    # step runs under no_grad. Mixed grad modes compiled every cascade variant twice and hit the default 8.
+    torch._dynamo.config.recompile_limit = 64
+    torch.set_grad_enabled(False)
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("Run with exactly one visible CUDA GPU; no dataset is needed.")
     print(f"DEVICE name={torch.cuda.get_device_name()} capability={torch.cuda.get_device_capability()} "
