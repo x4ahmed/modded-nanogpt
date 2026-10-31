@@ -37,7 +37,7 @@ from track_1_short.perf.cuda_graphs.capture_support import WARM_ITERATIONS, bits
 
 # Buffer-name prefixes of what each half writes.
 ATTN_OUTPUT_PREFIXES = ("attn_fp8.",)
-MLP_OUTPUT_PREFIXES = ("_mlp_", "_lm_head_f8_")
+MLP_OUTPUT_PREFIXES = ("_mlp_", "_lm_head_f8_", "parallel_down.")
 
 
 @dataclass(slots=True)

@@ -162,6 +162,8 @@ def main():
         ngram_dim=NGRAM_DIM, world_size=1, device=device,
     ).cuda()
     model.cast_matrix_weights_bf16()
+    print0(f"LOW_RANK_PARALLEL_MLP layer=8 slot=11 projection=down rank={model.parallel_down.rank} "
+           "precision=fp8 optimizer=anvil factor_comms=replicated", console=True)
     ngram = LocalNgramTable(max_events=schedule.total_steps, device=device)
     # The forward reads the table at the row ids themselves (portable/tables.py): it IS the row cache.
     model.ngram_cache = ngram.table

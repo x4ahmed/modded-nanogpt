@@ -46,7 +46,8 @@ BANK_BLEND_RATE = 2.0 / (BANK_BLEND_WINDOW // BANK_BLEND_PERIOD + 1)
 BANK_BLEND = 0.55
 RICHARDSON_W = 0.2007
 
-DECONTRACTION_LABELS = ("embed", "lm_head", "mlp_bank", "qk_bank", "vo_bank")
+LOW_RANK_LABELS = ("parallel_down.a", "parallel_down.b")
+DECONTRACTION_LABELS = ("embed", "lm_head", "mlp_bank", "qk_bank", "vo_bank", *LOW_RANK_LABELS)
 
 
 @dataclass
@@ -102,6 +103,12 @@ class TailAverages:
                             {"value_embeds": None}),
         ]
         # Allocate every buffer now: allocating on the first tick would land on the clock.
+        # Both down factors follow the MLP's averaging/blend windows. Their
+        # norms are restored separately, since their parameterization is new.
+        for acc in self.accumulators:
+            if "mlp_bank" in acc.labels:
+                acc.labels += LOW_RANK_LABELS
+                acc.blend.update({label: acc.blend["mlp_bank"] for label in LOW_RANK_LABELS})
         for acc in self.accumulators:
             for label in acc.labels:
                 acc.bufs[label] = torch.empty_like(self._own_shard(label), dtype=torch.float32)
@@ -121,6 +128,8 @@ class TailAverages:
         p = self._param(label)
         cfg = self.optimizer.param_cfgs[p]
         base = p.data.view(cfg.reshape) if cfg.optim == "anvil" else p.data
+        if cfg.comms == "replicated":
+            return base
         return base[self.rank * cfg.chunk_size:(self.rank + 1) * cfg.chunk_size]
 
     @torch.no_grad()
@@ -158,6 +167,8 @@ class TailAverages:
         for label in shipped:
             p = self._param(label)
             cfg = self.optimizer.param_cfgs[p]
+            if cfg.comms == "replicated":
+                continue
             full = p.data.view(cfg.reshape) if cfg.optim == "anvil" else p.data
             dist.all_gather_into_tensor(full, self._own_shard(label))
         norms_after = torch.stack([self._param(l).data.float().norm() for l in DECONTRACTION_LABELS])

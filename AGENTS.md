@@ -1,83 +1,73 @@
 # Agent handoff
 
 ## Working rules
-- Keep replies short, outcome first; normally under eight lines when practical.
-- For coding work report changes, files, verification, and unresolved issues.
+- Keep replies short and outcome first. Never omit failed checks or material limits.
 - Preserve the RTX adaptation and unrelated user changes. Do not restore old v1 plans.
-- User permits commits and pushes to the current remote branch. Never force-push.
-- Do not claim GPU validation from CPU tests. The user runs GPU checks on the cluster.
-- Update this file after meaningful changes, test results, or decisions, before handoff.
-- Replace stale summaries rather than appending a diary. Keep under 100 lines.
-- Keep only current settings, verified results, blockers, and next steps here.
-- Put long logs in logs/ and test instructions in tests/README.md; never copy logs here.
-- Do not silently change the model, precision, dataset, schedule, or validation metric.
+- User permits commits and pushes. Never force-push or move the frozen baseline.
+- Every experiment branches directly from baseline; never stack or merge experiments.
+- NEW USER RULE (2026-11-01): run a fresh baseline alongside every candidate, using
+  the same seed, GPU allocation, environment, data and validation settings. Future
+  commands must produce paired runs; historical results alone are not the control.
+- Start with seed 999; expand promising ideas to fresh paired seeds 999-1003.
+- Never SSH/scp to the cluster. The user executes GPU commands and shares output.
+- CPU checks are not GPU validation. No speed/quality claim without full-run evidence.
+- Update this file after meaningful changes/results/decisions. Replace stale text;
+  keep under 100 lines. Put protocols in docs/ and tests/, large results in logs/.
 
-## Goal and repository
-- Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
-- Branch: rtx-local-v2. Remote: https://github.com/x4ahmed/modded-nanogpt.
-- Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
-- Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
-- Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
-- Cluster uses Slurm; commands below require an existing one-GPU allocation.
+## Repository and goal
+- Goal: reduce training time at matched validation quality on RTX 5090, with a
+  plausible transfer path to 8xH100. Actual multi-GPU validation remains necessary.
+- Frozen baseline: 5be1ba0ca09293a007997cdce51c036bca3e89ae.
+- Active: experiment/low-rank-parallel-mlp, directly from baseline.
+- Entry: run_rtx.sh -> train_gpt_rtx.py; shared architecture: track_1_short/.
+- Cluster checkout: ~/speed-run/modded-nanogpt; training venv: ~/venvs/nanogpt.
+- Commands require one allocated RTX 5090; no concurrent training on that GPU.
 
-## Configuration to preserve
-- One RTX 5090 (SM120, 32 GB); observed torch 2.10.0+cu128 / CUDA 12.8.
-- PORTABLE=1; RTX_MICROBATCH_TOKENS=16384; RTX_NGRAM_DIVISOR=32.
-- N-gram table has 2,643,840 rows; this is a capacity reduction from upstream.
-- Stage accumulation counts: 8/16/24/20/8; retain existing gradient scaling.
-- RTX_EVAL_CE_SLAB_ROWS=4096; RTX_WARMUP_MICROBATCHES=2.
-- Validated RTX_VAL_SEQ_LEN=65536. Default is 262144, NOT validated by this check.
-- Keep validation packing fixed across local comparisons; do not claim upstream metric parity.
-- Full default schedule: 1194 optimizer updates. Remove RTX_MAX_STEPS for full runs.
-- Leave NUM_SCHEDULED_ITERATIONS unset; short tests truncate, never rescale the schedule.
-- Notion's existing seed plan is 999, 1000, 1001, 1002, 1003; 999 complete, four pending.
-- Training log is logs/<generated UUID>.txt; capture console separately for warnings.
+## Low-rank experiment
+- Only the extra MLP at position 8, bank slot 11, changes (zero-based indices).
+- Down projection 2816->768 becomes 2816->384->768, no additional nonlinearity.
+- Up projection, other ten active MLPs, attention, residual paths and schedules stay.
+- Both down factors train with ANVIL every step (2x down LR multiplier plus existing
+  shape scaling). Each uses a full-matrix averaged all-reduce on multiple GPUs.
+- A starts zero, B random nonzero; initialization preserves the baseline RNG stream.
+- Old slot-11 down weight remains frozen zero padding. No allocated-memory saving claim.
+- Training keeps FP8 GEMMs; validation BF16. New bottleneck uses current amax scaling.
+- Both factors participate in warmup reset, tail averaging, factorwise decontraction
+  and FP8-refresh capture. Optimization/averaging of factors differs from dense weights.
+- docs/low-rank-parallel-mlp.md owns details and limitations.
+- Theoretical saving: 18.2% of this MLP's matrix arithmetic, ~1.65% across all MLPs;
+  extra quantization/optimizer work can erase it. No measured gain yet.
 
-## Last verified state (2026-10-18)
-- Code commit f466280 fixed the observed fused-MLP NaNs on the user's 5090.
-- Narrow 128-column MLP tiles use masked pointer stores, forward/backward, both layouts.
-- FP8 math/scales and model structure were retained; wide-tile path retains descriptor stores.
-- All nine diagnostic cases passed, including sampled/full loss forward and backward.
-- MLP repeated eager/compiled forward and independent backward parity checks passed.
-- tests/check_rtx5090.py passed all sampled warmup stages, two full updates, and validation.
-- Validation loss after two updates: 8.883883 (not a convergence/baseline result).
-- Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
-- Twenty-one CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
-- First full pilot completed: seed 999, launch commit 9f0dfb9, 1194/1194 updates.
-- Pilot final validation loss 3.294856; recorded training time 837067 ms (13m57.067s).
-- Pilot warmup 95s (separate); peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
-- Pilot log: logs/7911de55-2adc-4ef7-b53a-a2a5db3e2edb.txt; predates W&B integration.
-- Supplied pilot output has finite logged losses and no canonical-mask fallback warning.
-- Evidence of learning/completion, not proof of upstream parity or multi-seed stability.
+## Frozen local settings
+- One RTX 5090 (SM120, 32 GB); PORTABLE=1.
+- RTX_MICROBATCH_TOKENS=16384; RTX_NGRAM_DIVISOR=32 (2,643,840 n-gram rows).
+- Stage accumulation counts 8/16/24/20/8; retain existing gradient scaling.
+- RTX_VAL_SEQ_LEN=65536; RTX_EVAL_CE_SLAB_ROWS=4096.
+- RTX_WARMUP_MICROBATCHES=2; RTX_MIN_HEADROOM_GIB=1.5.
+- Full schedule: 1194 optimizer updates. Unset RTX_MAX_STEPS, RTX_PREFLIGHT and
+  NUM_SCHEDULED_ITERATIONS. Short tests truncate, never rescale schedules.
+- Keep local validation packing fixed; do not claim upstream metric parity.
 
-## Open issue and next steps
-- Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
-- canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
-- Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
-- Continue tracking mask warnings; never silently exclude mask overhead from timings.
-- Keep training code/settings fixed; finish seeds 1000-1003. Report mean and sample SD (n-1).
-- One full pilot exists; no statistically established v2 baseline yet.
-- Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
-- Progress seed-results table: https://www.notion.so/3cb0b758a24e81faa372fac85828c1a0 (1/5 complete).
+## Commands and results
+- Pair: python -u tools/run_low_rank_pair.py --seeds 999 (clean experiment checkout).
+- Runner gates on focused CUDA check + full-model smoke, runs baseline then candidate,
+  saves commits/results/deltas in logs/pairs/<UTC>/seed-999.json, restores experiment.
+- GPU-only checks: python -u tests/check_low_rank_mlp.py; python -u tests/check_rtx5090.py.
+- CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
+- Current CPU checks cover algebra, AOT autograd, initialization/RNG, reset, replica
+  ownership/reduction, pair ordering/failure handling and existing launch/upload behavior.
+- RTX 5090 numerical checks, memory, convergence and timing remain pending. No H100 test.
+- Frozen five-seed historical baseline: loss 3.2948572 +/- 0.00104874 SD;
+  time 861.635 +/- 1.608645 s SD. Use fresh paired controls for new comparisons.
+- Prior architecture/optimizer ideas were not promoted: AttnRes, minimal readout,
+  bigram output prior, DeltaNet, sampled taper, per-head V/O and whole Q/K whitening.
+- Async uploads showed a local-only timing gain; Gram NS showed little total-run potential.
+- Canonical-mask warnings and rebuild time remain part of measured training time.
 
-## Verification commands
-- GPU diagnostics: python -u tests/diagnose_rtx5090.py
-- GPU smoke: python -u tests/check_rtx5090.py
-- CPU: python -m unittest discover -s tests -p 'test_*.py' -v
-- Diagnostic cases are isolated; BF16 controls are tests, not production configuration.
-- Keep diagnostic timings separate from uninstrumented full training timings.
-
-## Post-training monitoring
-- tools/upload_wandb.py imports completed logs only; training code/timer unchanged.
-- Setup/API-key guidance: tools/README.md; use a separate uploader venv, no GPU needed.
-- Preview with --dry-run; never upload raw source logs or put API keys in Git/chat.
-- Compare recorded training_time_ms, not W&B uploader runtime. Do not infer training commit/seed.
-- Upload one log per run; stable content-based IDs refuse duplicate online imports.
-- User screenshot confirms W&B upload succeeded. Uploader venv required pip installation via training pip --python.
-- Future uploads plot training loss vs optimizer step, training seconds and minutes; axis-only plots hidden.
-- Loss/time uses each training-loss line's timestamp, not later validation/finalization at the same step.
-- Final loss, total time and memory remain summary metrics; old workspace panels need manual hiding.
-- run_rtx.sh auto-uploads to i-learn/speedrun only after successful non-preflight runs.
-- Uses ~/venvs/wandb-upload/bin/python (override WANDB_UPLOAD_PYTHON); RTX_WANDB_UPLOAD=0 opts out.
-- Launcher saves console log and captures launch commit/seed; upload failure retains local results.
-- Launcher names W&B runs baseline-1gpu-seed-<seed>; repeat names do not overwrite distinct run IDs.
+## Logging
+- Trainer log: logs/<UUID>.txt; launcher console: logs/run-*.console.txt.
+- W&B entity/project i-learn/speedrun, uploaded only after training ends.
+- Uploader: ~/venvs/wandb-upload/bin/python (WANDB_UPLOAD_PYTHON override).
+- Names: baseline-1gpu-seed-N and low-rank-parallel-r384-1gpu-seed-N.
+- Repeated names retain distinct IDs; pair JSON records corresponding console logs.
+- Never expose API keys or upload raw source logs. Upload failure retains local results.

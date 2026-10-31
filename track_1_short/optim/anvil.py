@@ -232,9 +232,9 @@ class AnvilAndAdam:
       and results are all-gathered.
 
     Adam parameters may be freely sharded. ANVIL operates on full matrices; sharding is
-    supported by grouping matrices into parameter banks. ANVIL parameters must have a
-    `.reshape` attribute that reshapes the bank so that the leading dimension is divisible
-    by world_size.
+    supported by grouping matrices into parameter banks. Sharded ANVIL parameters must have a
+    `.reshape` attribute whose leading dimension is divisible by world_size. Replicated ANVIL
+    parameters use the full reshape on every rank, with averaged all-reduce gradients.
 
     # Contributors include @YouJiacheng, @KonstantinWilleke, @alexrgilbert, @adricarda,
     # @tuttyfrutyee, @vdlad, @ryanyang0, @vagrawal, @varunneal, @chrisjmccormick
@@ -319,10 +319,10 @@ class AnvilAndAdam:
             reshape = getattr(param, "reshape", None)
             if reshape is None:
                 raise ValueError(f"ANVIL param {label} must have .reshape attribute")
-            if reshape[0] % self.world_size != 0:
+            if comms == "sharded" and reshape[0] % self.world_size != 0:
                 raise ValueError(f"reshape[0]={reshape[0]} must be divisible by world_size")
 
-            chunk_size = reshape[0] // self.world_size
+            chunk_size = reshape[0] // self.world_size if comms == "sharded" else reshape[0]
             chunk_shape = (chunk_size, *reshape[1:])
             # Shape-based LR multiplier for ANVIL
             shape_mult = max(1.0, chunk_shape[-2] / chunk_shape[-1]) ** 0.5 if len(chunk_shape) >= 2 else 1.0
@@ -432,7 +432,7 @@ class AnvilAndAdam:
         both the bank and the graphs' address check use)."""
         param = self._param_by_label[label]
         cfg, state = self.param_cfgs[param], self.param_states[param]
-        lo = self.rank * cfg.chunk_size
+        lo = self.rank * cfg.chunk_size if cfg.comms == "sharded" else 0
         return dict(velocity=state["velocity"], lane_energy=state["lane_energy"], mantissa=state["mantissa"],
                     p_slice=param.data.view(cfg.reshape)[lo:lo + cfg.chunk_size])
 
@@ -453,6 +453,14 @@ class AnvilAndAdam:
     def _launch_reduce(self, param: nn.Parameter, grad: Tensor):
         """Launch async reduce for a parameter based on its comms policy."""
         p_cfg = self.param_cfgs[param]
+        if p_cfg.optim == "anvil" and p_cfg.comms == "replicated":
+            # A single small factor cannot be split across matrix-whitening ranks.
+            # Average its gradients, then update the same matrix on every rank.
+            grad_chunk = self.banks[p_cfg.label].grad
+            grad_chunk.copy_(grad.view(p_cfg.reshape))
+            future = dist.all_reduce(grad_chunk, op=dist.ReduceOp.AVG, async_op=True).get_future()
+            self._reduce_futures[param] = (future, grad_chunk)
+            return
         if p_cfg.comms == "sharded":
             if p_cfg.optim == "anvil":
                 # ANVIL: reshape before reduce_scatter, into the bank's persistent gradient buffer

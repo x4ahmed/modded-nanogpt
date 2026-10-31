@@ -71,7 +71,7 @@ def run_check(args):
     finally:
         sys.argv[0] = entry_path
 
-    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False}
+    state = {"reset": False, "updates": 0, "final_loss": None, "memory": False, "low_rank_gradients": set()}
 
     def finite(label, tensor):
         if tensor is None or not tensor.is_floating_point() or tensor.numel() == 0:
@@ -107,6 +107,9 @@ def run_check(args):
     def checked_collect(accumulator):
         for i, param in enumerate(accumulator.params):
             finite(f"parameter gradient {i}", param.grad)
+            if state["reset"] and getattr(param, "label", "") in ("parallel_down.a", "parallel_down.b"):
+                if param.grad is not None and param.grad.count_nonzero().item():
+                    state["low_rank_gradients"].add(param.label)
         original_collect(accumulator)
 
     trainer.GradAccumulator.collect = checked_collect
@@ -175,6 +178,8 @@ def run_check(args):
 
     trainer.MemoryReport.verdict = checked_verdict
     trainer.main()
+    if state["low_rank_gradients"] != {"parallel_down.a", "parallel_down.b"}:
+        raise RuntimeError("Both low-rank factors must receive nonzero gradients in the real post-reset updates")
     if state["updates"] != 2 or state["final_loss"] is None or not state["memory"]:
         raise RuntimeError(f"Incomplete verification: {state}")
     print(f"RTX5090_CHECK status=pass updates=2 final_val_loss={state['final_loss']:.6f}")

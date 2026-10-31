@@ -165,6 +165,8 @@ def main():
         f"steps={training_schedule.total_steps} stage boundaries={training_schedule.boundaries}"
     )
     model.cast_matrix_weights_bf16()
+    print0(f"LOW_RANK_PARALLEL_MLP layer=8 slot=11 projection=down rank={model.parallel_down.rank} "
+           "precision=fp8 optimizer=anvil factor_comms=replicated", console=True)
     for param in model.parameters():
         dist.broadcast(param.detach(), 0)
     dist.broadcast(model.ngram_sign_pool, 0)  # buffer, not in parameters()

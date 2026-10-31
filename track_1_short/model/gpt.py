@@ -8,6 +8,7 @@ from torch import Tensor, nn
 
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
 from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
+from track_1_short.model.low_rank import LowRankParallelDown
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
     FusedSoftcappedCrossEntropy,
@@ -193,6 +194,8 @@ class GPT(nn.Module):
         self.init_misc(model_dim, num_layers)
         self.init_mudd(num_layers, model_dim)
         self.init_mudd_gate(model_dim)
+        # Created after every baseline initialization draw; its own draw is RNG-isolated.
+        self.parallel_down = LowRankParallelDown(self.mlp_hdim, model_dim, device=device)
 
         # Auto-label parameters
         for name, param in self.named_parameters():
@@ -289,7 +292,8 @@ class GPT(nn.Module):
         self.mlp_bank = nn.Parameter(torch.empty(NUM_MLP_SLOTS, 2, self.mlp_hdim, model_dim))  # (12, 2, 2816, 768)
         self.mlp_bank.reshape = (2 * NUM_MLP_SLOTS, self.mlp_hdim, model_dim)  # Shape for sharding: (24, 2816, 768)
         # The optimizer leaves these matrices untouched: c_fc and c_proj of each NO_MLP_LAYERS slot.
-        self.mlp_bank.frozen_matrices = frozenset(2 * layer + j for layer in NO_MLP_LAYERS for j in (0, 1))
+        self.mlp_bank.frozen_matrices = frozenset(
+            [2 * layer + j for layer in NO_MLP_LAYERS for j in (0, 1)] + [2 * PARALLEL_MLP_SLOT + 1])
 
         # improved init scale by @YouJiacheng and @srashedll
         std = 0.5 * model_dim ** -0.5
@@ -763,7 +767,7 @@ class GPT(nn.Module):
                 # Same input and the same post-lambda as the layer's own MLP.
                 k = PARALLEL_MLP_SLOT
                 parallel_args = self._mlp_fp8_args(k, mlp_up_f8[k], x_f8, fold_p) if use_fp8 else None
-                parallel_out = self._mlp(mlp_in, mlp_fcs[k], mlp_projs[k], parallel_args)
+                parallel_out = self.parallel_down.mlp(mlp_in, mlp_fcs[k], parallel_args)
                 x = x + (parallel_out if fold_p is not None else scale(post_lambdas_mlp[i], parallel_out))
 
             if i in CACHE_LAYERS:
@@ -840,6 +844,7 @@ class GPT(nn.Module):
             if isinstance(m, (nn.Embedding, nn.Linear)):
                 m.weight.data = m.weight.data.bfloat16()
         for param in (self.ve_gate_bank, self.qk_bank, self.vo_bank, self.mlp_bank,
+                      self.parallel_down.a, self.parallel_down.b,
                       self.mudd_w1, self.mudd_w2, self.mudd_w2g, self.mudd_b2,
                       self.mudd_gate_w1, self.mudd_gate_w2, self.mudd_gate_b2):
             param.data = param.data.bfloat16()
@@ -906,7 +911,10 @@ class GPT(nn.Module):
         lm_head only changes on Adam steps, so the caller passes refresh_lm=False after the others.
         """
         with torch.no_grad():
+            exact = self.mlp_quantize_calls < FP8_EXACT_SCALE_CALLS
             self._quantize_mlp_weights_and_scales()
+            self.parallel_down.refresh(exact=exact, post_lambda=self._mlp_fold_p[PARALLEL_MLP_SLOT],
+                                       grad_scale=self._mlp_grad_scale)
             if refresh_lm:
                 quantize_lm_head_dual(self.lm_head.weight, self._lm_head_f8_row, self._lm_head_f8_col, self._lm_head_inv_w_s)
 
@@ -950,6 +958,7 @@ class GPT(nn.Module):
                 amax.zero_()
             self._mlp_dpre_scales.fill_(FP8_GRAD_SCALE)
             self._mlp_post_scales.fill_(1.0)
+            self.parallel_down.rearm()
 
     def _attn_fp8_weights(self):
         """Per attention layer: (qkv_f8, qkv_f8_t, qkv_scale) from its width group's cache, for PackedFP8QKV."""

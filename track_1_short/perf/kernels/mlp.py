@@ -404,8 +404,9 @@ dx_f8_op = _f8_mm_op("dx_f8", transpose_b=False, fast_accum=False)    # dx  = dp
 
 
 class FusedLinearReLUSquareFunction(torch.autograd.Function):
-    """relu(x @ W1.T)^2 @ W2 as one autograd op. x is the [T, 768] bf16 normed residual; W1/W2 are
-    [H, 768] bf16 bank slices. Called with only (x, W1, W2) it runs the bf16 forward (validation, under
+    """relu(x @ W1.T)^2 @ W2 as one autograd op. W1[H,Din] and W2[H,Dout] may be rectangular:
+    ordinary MLPs have Din=Dout=768; the low-rank factor uses Dout=384. Called with only
+    (x, W1, W2) it runs the bf16 forward (validation, under
     no_grad: it has no backward). Training passes the fp8 caches and scales too (see GPT._mlp_fp8_args),
     all of them:
       W1_f8 / w1_f8_col   W1 in e4m3, row-major and column-major
@@ -423,7 +424,7 @@ class FusedLinearReLUSquareFunction(torch.autograd.Function):
         x_flat = x.view((-1, x.shape[-1]))
         if W1_f8 is None:  # validation: nothing saved, the backward below is fp8-only
             _, post, _, _ = linear_relu_square(x_flat, W1)
-            return (post @ W2).view(x.shape)
+            return (post @ W2).view(*x.shape[:-1], W2.shape[-1])
         # The fp8 forward emits the e4m3 post in both layouts (the fp8 down projection and dW2) and
         # no bf16 pre or post.
         _, _, post_f8, post_t = linear_relu_square(
@@ -440,7 +441,7 @@ class FusedLinearReLUSquareFunction(torch.autograd.Function):
         ctx.w2_f8_row, ctx.dq_bwd, ctx.x_f8_t, ctx.x_scale = w2_f8_row, dq_bwd, x_f8_t, x_scale
         ctx.w1_f8_col, ctx.w1_scale, ctx.g_scale = w1_f8_col, w1_scale, g_scale
         ctx.dpre_scale, ctx.dpre_amax = dpre_scale, dpre_amax
-        return x3.view(x.shape)
+        return x3.view(*x.shape[:-1], W2.shape[-1])
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -472,3 +473,24 @@ class FusedLinearReLUSquareFunction(torch.autograd.Function):
 
         # One slot per forward input: (x, W1, W2), 16 fp8 args, p_fold.
         return (dx.view(x.shape), dW1, dW2) + (None,) * 16 + (grad_p,)
+
+
+class FP8LowRankReadout(torch.autograd.Function):
+    """FP8 linear R -> D; no extra activation between the two down factors."""
+    @staticmethod
+    def forward(ctx, x, weight, row, col, weight_scale, x_scale, grad_scale):
+        flat = x.reshape(-1, x.shape[-1])
+        x_f8, x_t = quantize_dual_layout_fused(flat, x_scale, torch.float8_e4m3fn)
+        out = torch.ops.nanogpt.dp_f8(x_f8, row.T, x_scale, weight_scale)
+        ctx.save_for_backward(x_t, col, weight_scale, x_scale, grad_scale)
+        ctx.input_shape = x.shape
+        return out.view(*x.shape[:-1], weight.shape[0])
+
+    @staticmethod
+    def backward(ctx, grad):
+        x_t, col, weight_scale, x_scale, grad_scale = ctx.saved_tensors
+        g_f8, g_t = quantize_dual_layout_fused(grad.reshape(-1, grad.shape[-1]), grad_scale,
+                                             torch.float8_e5m2)
+        dx = torch.ops.nanogpt.dx_f8(g_f8, col, grad_scale, weight_scale)
+        dw = torch.ops.nanogpt.wg1_f8(g_t, x_t, grad_scale, x_scale)
+        return dx.view(ctx.input_shape), dw, None, None, None, None, None

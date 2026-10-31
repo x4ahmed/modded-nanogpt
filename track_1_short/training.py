@@ -58,6 +58,8 @@ class TrainingManager():
             "qk_bank":        {"optim": "anvil",   "comms": "sharded",    "adam_betas": None},
             "vo_bank":        {"optim": "anvil",   "comms": "sharded",    "adam_betas": None},
             "mlp_bank":       {"optim": "anvil",   "comms": "sharded",    "adam_betas": None},
+            "parallel_down.a": {"optim": "anvil", "comms": "replicated", "adam_betas": None, "lr_mul": 2.0},
+            "parallel_down.b": {"optim": "anvil", "comms": "replicated", "adam_betas": None, "lr_mul": 2.0},
             "scalars":        {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99], "lr_mul": 5.0,  "wd_mul": 0.0},
             "smear_gate":     {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99], "lr_mul": 0.01, "wd_mul": 0.0},
             "ve_gate_bank":   {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99]},
@@ -81,10 +83,10 @@ class TrainingManager():
         })
 
         # NCCL runs one stream in enqueue order and future.wait() is a stream wait, so scatter_order is
-        # the comms schedule (record #360). The replicated params are all-reduced as one flat buffer ahead
-        # of all of these (perf/replicated_adam.py); their entries here only name them.
+        # the comms schedule (record #360). Replicated Adam params use one flat reduction ahead of
+        # these (perf/replicated_adam.py); the two new replicated ANVIL factors reduce in this order.
         self.scatter_order = [
-            "qk_bank", "vo_bank", "mlp_bank",
+            "qk_bank", "vo_bank", "mlp_bank", "parallel_down.a", "parallel_down.b",
             "value_embeds",  # the row-sparse gradient exchanges of both tables (optim/anvil.py SparseUpdate)
             "lm_head", "embed",
             "scalars", "smear_gate", "ve_gate_bank", "post_lambdas", "resid_lambdas",
@@ -103,7 +105,7 @@ class TrainingManager():
             "qk_bank", "vo_bank", "lm_head", "embed", "value_embeds",
             "scalars", "smear_gate", "ve_gate_bank", "mudd_b2", "mudd_gate_b2", "_mudd_gate_scale",
             "post_lambdas", "resid_lambdas", "mudd_w2", "mudd_w2g", "mudd_gate_w2", "mudd_w1", "mudd_gate_w1",
-            "mlp_bank",
+            "mlp_bank", "parallel_down.a", "parallel_down.b",
         ]
 
         self.adam_defaults = adam_defaults = dict(

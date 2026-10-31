@@ -1,5 +1,11 @@
 # RTX 5090 diagnostics
 
+On `experiment/low-rank-parallel-mlp`, use the automatic paired runner:
+`python -u tools/run_low_rank_pair.py --seeds 999`.
+It first checks the new FP8 rectangular MLP and both factor gradients, then runs the
+full-model smoke test, followed by a fresh baseline and candidate. See
+[the experiment protocol](../docs/low-rank-parallel-mlp.md) for setup, logs and limits.
+
 Inside a Slurm allocation with one RTX 5090 and the training venv active:
 
 ```bash
