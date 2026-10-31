@@ -19,15 +19,17 @@ def main():
     args = parser.parse_args()
     import torch
     from track_1_short.model.low_rank import LowRankParallelDown
-    from track_1_short.perf.kernels.mlp import prime_stage_cache, quantize_dual_layout_fused
-    from low_rank_reference import compare, fp8_reference, scalar_diagnostic
+    import triton
+    from track_1_short.perf.kernels.mlp import linear_relu_square, prime_stage_cache, quantize_dual_layout_fused
+    from low_rank_reference import ParityReport, fp8_reference, scalar_diagnostic
 
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9:
         raise RuntimeError("This check needs SM90+ (H100 or RTX 5090), not a CPU/older GPU.")
     if args.tokens <= 0 or args.tokens % 128:
         raise ValueError("--tokens must be a positive multiple of 128")
     torch.manual_seed(999)
-    print(f"LOW_RANK_CHECK device={torch.cuda.get_device_name()} tokens={args.tokens}", flush=True)
+    print(f"LOW_RANK_CHECK device={torch.cuda.get_device_name()} tokens={args.tokens} "
+          f"torch={torch.__version__} triton={triton.__version__}", flush=True)
     # Import the actual scale constants without requiring Hopper's attention
     # package in this standalone MLP check. No attention is executed here.
     os.environ.setdefault("PORTABLE", "1")
@@ -35,6 +37,27 @@ def main():
     # The independent oracle uses genuine FP32 matmuls, not TF32 approximations.
     torch.backends.cuda.matmul.allow_tf32 = False
     prime_stage_cache()
+    report = ParityReport()
+    compare = report.compare
+
+    # Exact operands expose the FP32-square -> FP8 rounding boundary directly
+    # in the real fused kernel, independently of the random full-chain checks.
+    with torch.no_grad():
+        probe_x = torch.zeros(128, 768, device="cuda", dtype=torch.bfloat16)
+        probe_up = torch.zeros(2816, 768, device="cuda", dtype=torch.bfloat16)
+        probe_x[:, 0], probe_x[:, 1] = 1., .125
+        probe_up[:, 0], probe_up[:, 1] = 1., .25
+        one = torch.tensor(1., device="cuda")
+        pre, _, post, post_t = linear_relu_square(
+            probe_x, probe_up, a_f8=probe_x.to(torch.float8_e4m3fn),
+            b_f8=probe_up.to(torch.float8_e4m3fn), dequant_scale_ptr=one,
+            emit_f8=True, emit_t=True, store_pre=True, store_post_bf=False,
+            post_scale=one, post_amax=torch.zeros(1, device="cuda"))
+        compare("epilogue/pre", pre, torch.full_like(pre, 1.03125), 0.)
+        compare("epilogue/fp32-square-to-fp8", post.float(), torch.full_like(pre, 1.125), 0.)
+        compare("epilogue/transpose", post_t.float(), post.float().T, 0.)
+        del probe_x, probe_up, pre, post, post_t, one
+
     part = LowRankParallelDown(2816, 768, device="cuda")
     part.a.data = part.a.data.bfloat16()
     part.b.data = part.b.data.bfloat16()
@@ -113,6 +136,7 @@ def main():
         with torch.no_grad():
             compare(f"{name}/bf16-eval", part.mlp(x, up), part.reference(x, up), .02)
         torch.cuda.synchronize()
+    report.finish()
     print("LOW_RANK_CHECK status=pass rank=384 eager=true compiled=true", flush=True)
 
 

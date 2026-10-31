@@ -79,3 +79,11 @@ post-lambda, a random signed dot product can nearly cancel, so its raw drift is 
 as a diagnostic; a reference-aligned, non-cancelling probe gates BF16 parity at the original
 15% limit. Random scalar parity is still gated against the quantized oracle. These are
 numerical screening tolerances, not evidence of convergence or quality equivalence.
+
+The 3.345% cluster output failure exposed an extra BF16 rounding in the test oracle.
+[Triton 3.6 promotes the ReLU maximum to FP32](https://github.com/triton-lang/triton/blob/v3.6.0/python/triton/language/core.py#L2337-L2342),
+so the square must go directly from FP32 to FP8. The oracle now matches this boundary.
+An exact CPU regression fails with the old oracle; a local arithmetic simulation
+showed ~3.30% output drift from that rounding alone (not an RTX kernel validation).
+The GPU check now probes this boundary explicitly and reports all parity failures
+before exiting unsuccessfully. No production arithmetic or tolerances changed.

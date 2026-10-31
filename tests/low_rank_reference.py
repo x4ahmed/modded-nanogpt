@@ -24,7 +24,11 @@ def fp8_reference(x, up, a, b, p, grad, *, x_scale, grad_scale, up_scale,
     xq = quantize(x.flatten(0, 1), x_scale, e4)
     uq, aq, bq = (quantize(w, s, e4) for w, s in ((up, up_scale), (a, a_scale), (b, b_scale)))
     pre = mm(xq, uq.T, x_scale, up_scale)
-    post = pre.relu().square()
+    # Triton 3.4-3.6 tl.maximum promotes BF16 to FP32. The fused kernel
+    # squares in FP32 and goes straight to FP8 (no BF16 post store).
+    # A BF16 square here introduces double rounding at FP8 midpoints.
+    # https://github.com/triton-lang/triton/blob/v3.6.0/python/triton/language/core.py#L2337-L2342
+    post = pre.float().relu().square()
     pq = quantize(post, post_scale, e4)
     folded_a_scale = a_scale * p.float()
     middle = mm(pq, aq, post_scale, folded_a_scale)
@@ -63,6 +67,24 @@ def compare(label, actual, expected, limit):
     print(f"PARITY {label} abs_l2={error:.6g} ref_l2={reference:.6g} rel_l2={relative:.6g} limit={limit}", flush=True)
     if relative > limit:
         raise AssertionError(f"{label} exceeds parity tolerance")
+
+
+class ParityReport:
+    """Print all numerical failures before failing the training gate."""
+    def __init__(self):
+        self.failures = []
+
+    def compare(self, label, actual, expected, limit):
+        try:
+            compare(label, actual, expected, limit)
+        except AssertionError as exc:
+            self.failures.append(label)
+            print(f"PARITY_FAIL {label}: {exc}", flush=True)
+
+    def finish(self):
+        if self.failures:
+            print(f"LOW_RANK_CHECK status=fail failed_checks={len(self.failures)}", flush=True)
+            raise AssertionError("Failed parity checks: " + ", ".join(self.failures))
 
 
 def scalar_diagnostic(label, actual, expected):

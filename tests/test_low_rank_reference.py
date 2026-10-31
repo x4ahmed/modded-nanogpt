@@ -5,10 +5,26 @@ import unittest
 
 import torch
 
-from low_rank_reference import compare, fp8_reference, scalar_diagnostic
+from low_rank_reference import ParityReport, compare, fp8_reference, scalar_diagnostic
 
 
 class LowRankReferenceTests(unittest.TestCase):
+    def test_fp8_relu_square_avoids_extra_bf16_rounding(self):
+        # Exact FP8 operands give pre = 1 + .125 * .25 = 1.03125.
+        # FP32 square 1.0634765625 rounds to FP8 1.125. Rounding it
+        # through BF16 first gives 1.0625, an FP8 tie that rounds to 1.0.
+        x = torch.tensor([[[1., .125], [-1., -.125]]], dtype=torch.bfloat16)
+        up = torch.tensor([[1., .25]], dtype=torch.bfloat16)
+        a = torch.ones(1, 1, dtype=torch.bfloat16)
+        b = torch.ones(2, 1, dtype=torch.bfloat16)
+        one = torch.tensor(1.)
+        got, _ = fp8_reference(
+            x, up, a, b, one.bfloat16(), torch.zeros_like(x),
+            x_scale=one, grad_scale=one, up_scale=one, a_scale=one,
+            b_scale=one, post_scale=one, dpre_scale=one)
+        expected = torch.tensor([[[1.125, 1.125], [0., 0.]]], dtype=torch.bfloat16)
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+
     def test_exactly_representable_chain_rule_including_lambda(self):
         for p_value in (1., 2.):
             for zero_a in (False, True):
@@ -55,6 +71,27 @@ class LowRankReferenceTests(unittest.TestCase):
     def test_quantized_reference_check_rejects_large_gradient_error(self):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(AssertionError):
             compare("quantized-reference/a", torch.tensor([1., 2.5]), torch.tensor([1., 2.]), .03)
+
+    def test_report_prints_later_checks_but_still_fails(self):
+        report = ParityReport()
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            report.compare("output", torch.tensor(2.), torch.tensor(1.), .03)
+            report.compare("later-gradient", torch.tensor(1.), torch.tensor(1.), .03)
+            report.compare("nonfinite", torch.tensor(float("nan")), torch.tensor(1.), .03)
+            with self.assertRaises(AssertionError):
+                report.finish()
+        self.assertEqual(report.failures, ["output", "nonfinite"])
+        self.assertIn("PARITY later-gradient", stream.getvalue())
+        self.assertIn("LOW_RANK_CHECK status=fail failed_checks=2", stream.getvalue())
+        self.assertNotIn("status=pass", stream.getvalue())
+
+    def test_report_accepts_all_passes(self):
+        report = ParityReport()
+        with contextlib.redirect_stdout(io.StringIO()):
+            report.compare("exact", torch.tensor(1.), torch.tensor(1.), 0.)
+            report.finish()
+        self.assertFalse(report.failures)
 
 
 if __name__ == "__main__":

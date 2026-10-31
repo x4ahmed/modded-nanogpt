@@ -57,11 +57,13 @@
 - Current CPU checks cover algebra, AOT autograd, initialization/RNG, reset, replica
   ownership/reduction, pair ordering/failure handling and existing launch/upload behavior.
 - Focused check fixes: detach FP8 caches like production; use production scale constants.
-- Random-probe scalar FP8/BF16 parity hit 16%; no training ran. The check now gates
-  every output/gradient against an independent quantized oracle (3%), retains vector
-  BF16 limits (10%/15%), and tests scalar BF16 parity on an aligned energy probe (15%).
-  Random scalar drift is still printed. Local quantization simulation reproduced
-  cancellation sensitivity; this does not establish RTX kernel correctness.
+- Latest cluster gate: quantized-reference output differed 3.345%; no training ran.
+  The oracle incorrectly rounded ReLU^2 to BF16 before FP8; Triton 3.6 computes the
+  square in FP32. Corrected and regression-tested; local simulation showed ~3.30%
+  drift from that extra rounding alone. Exact GPU epilogue probe awaits execution.
+- Gates unchanged: quantized oracle 3%, BF16 output/gradients 10%/15%, aligned scalar
+  15%. Random scalar BF16 drift is diagnostic (cancellation); quantized scalar gates.
+  All parity failures print before a nonzero exit; full runs remain gated.
 - RTX 5090 numerical checks, memory, convergence and timing remain pending. No H100 test.
 - Frozen five-seed historical baseline: loss 3.2948572 +/- 0.00104874 SD;
   time 861.635 +/- 1.608645 s SD. Use fresh paired controls for new comparisons.
