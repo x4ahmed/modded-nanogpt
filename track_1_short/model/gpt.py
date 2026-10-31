@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
-from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
+from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm, token_shift
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
     FusedSoftcappedCrossEntropy,
@@ -345,6 +345,9 @@ class GPT(nn.Module):
     def init_misc(self, model_dim, num_layers):
         self.smear_gate = nn.Linear(12, 1, bias=False)
         nn.init.zeros_(self.smear_gate.weight)
+        # The smear inside the network: at the start of every layer the residual takes a learned
+        # per-channel share of the previous position's (token_shift). Zero: training starts as without it.
+        self.layer_smear = nn.Parameter(torch.zeros(num_layers, model_dim))
 
         # The n-gram table itself is sharded across ranks and lives in NgramTable; the model keeps its
         # +-1 sign pool (identical on every rank: main() broadcasts it).
@@ -587,6 +590,7 @@ class GPT(nn.Module):
         resid_lambdas_mlp  = self.resid_lambdas[:, 1].bfloat16().unbind(0)
         post_lambdas_attn = self.post_lambdas[:, 0].bfloat16().unbind(0)
         post_lambdas_mlp  = self.post_lambdas[:, 1].bfloat16().unbind(0)
+        layer_smear = self.layer_smear.bfloat16().unbind(0)
         ve_gates = [None] * self.num_layers
         for layer, gate in zip(VALUE_EMBED_GATE_LAYERS, self.ve_gate_bank.unbind(0)):
             ve_gates[layer] = gate
@@ -652,6 +656,7 @@ class GPT(nn.Module):
             c_fc = mlp_fcs[i]
             c_proj = mlp_projs[i]
             mu = None
+            x = token_shift(x, layer_smear[i])
 
             if i == POST_GATE_LAYER:
                 post_gate = self.forward_mudd_gate(x, id=1, num_coef=self._mudd_gate_post_num_coef)

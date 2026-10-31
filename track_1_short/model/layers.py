@@ -10,6 +10,15 @@ def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
 
 
+def token_shift(x: Tensor, w: Tensor) -> Tensor:
+    """x + w * (the previous position's x) along the sequence (dim 1); the first position sees zeros.
+
+    The padded shift is pointwise with an offset load, so the compiler can fuse it with its neighbours.
+    Like the input smear it does not stop at document boundaries.
+    """
+    return x + w * F.pad(x[:, :-1], (0, 0, 1, 0))
+
+
 class CastedLinearT(nn.Module):
     """
     Linear layer with transposed weight storage (in_features, out_features) which

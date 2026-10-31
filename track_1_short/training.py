@@ -60,6 +60,7 @@ class TrainingManager():
             "mlp_bank":       {"optim": "anvil",   "comms": "sharded",    "adam_betas": None},
             "scalars":        {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99], "lr_mul": 5.0,  "wd_mul": 0.0},
             "smear_gate":     {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99], "lr_mul": 0.01, "wd_mul": 0.0},
+            "layer_smear":    {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99], "lr_mul": 1.0,  "wd_mul": 0.0},
             "ve_gate_bank":   {"optim": "adam",    "comms": "replicated", "adam_betas": [0.9,  0.99]},
             "lm_head":        {"optim": "adam",    "comms": "sharded",    "adam_betas": [0.5,  0.95], "wd_mul": 150.},
             "post_lambdas":   {"optim": "adam",    "comms": "replicated",     "adam_betas": [0.9,  0.95], "lr_mul": 1.0,  "wd_mul": 0.0},
@@ -87,7 +88,7 @@ class TrainingManager():
             "qk_bank", "vo_bank", "mlp_bank",
             "value_embeds",  # the row-sparse gradient exchanges of both tables (optim/anvil.py SparseUpdate)
             "lm_head", "embed",
-            "scalars", "smear_gate", "ve_gate_bank", "post_lambdas", "resid_lambdas",
+            "scalars", "smear_gate", "layer_smear", "ve_gate_bank", "post_lambdas", "resid_lambdas",
             "mudd_w1", "mudd_w2", "mudd_w2g", "mudd_b2", "mudd_gate_w1", "mudd_gate_w2", "mudd_gate_b2",
             "_mudd_gate_scale",
         ]
@@ -101,7 +102,7 @@ class TrainingManager():
         #   gather, last
         self.work_order = [
             "qk_bank", "vo_bank", "lm_head", "embed", "value_embeds",
-            "scalars", "smear_gate", "ve_gate_bank", "mudd_b2", "mudd_gate_b2", "_mudd_gate_scale",
+            "scalars", "smear_gate", "layer_smear", "ve_gate_bank", "mudd_b2", "mudd_gate_b2", "_mudd_gate_scale",
             "post_lambdas", "resid_lambdas", "mudd_w2", "mudd_w2g", "mudd_gate_w2", "mudd_w1", "mudd_gate_w1",
             "mlp_bank",
         ]
