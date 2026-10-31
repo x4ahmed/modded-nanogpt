@@ -55,3 +55,4 @@ CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_s
 GPU: `python -u tests/check_rtx5090.py`; its output must include `LAYER_SMEAR per_channel layers=11`.
 CPU: `python -m unittest discover -s tests -p test_layer_smear.py` (shift arithmetic and gradients, exact
 identity at zero, wiring into the forward and the optimizer). See `docs/layer-smear.md`.
+Debug the non-finite layer-smear gradient: `python -u tests/debug_layer_smear.py 2>&1 | grep -E "SMEAR_DEBUG|RTX5090_CHECK|Error"`.
