@@ -53,7 +53,7 @@
   groups stacked, anvil_cascade merge_groups); momentum/equalizer per group. docs/qk-whole.md. W&B qk-whole-...
 - Seed 999 (2026-10-30, tujestpolin): 3.294659 / 825.989 s vs baseline seed-999 runs 3.294980/3.295181/3.295634.
 - Result: -0.0006 vs their mean, within ±0.002 (neutral); time +0.4 s vs 825.5 s same machine (noise).
-  Five seeds could not resolve < ~0.002; even -0.0006 is worth ~0.1 s upstream. Pending user decision.
+  Five seeds could not resolve < ~0.002; even -0.0006 is worth ~0.1 s upstream. STOPPED (user, 2026-10-31).
 - experiment/vo-heads (per-head V/O whitening): seed 999 3.307629, +0.0124 loss. STOPPED. Coarser whitening wins there.
 - experiment/gram-ns-mlp (Gram NS for MLP whitening, other agent's branch): diagnostic pass; bank 21% faster on the
   5090 (2.2 s/run), ~5% at H100 per-GPU size (<= 0.08 s/run). Not worth it upstream; training run not done.
