@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
-from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
+from track_1_short.model.layers import CastedLinearT, cross_entropy_at_temperatures, next_multiple_of_n, norm
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
     FusedSoftcappedCrossEntropy,
@@ -158,6 +158,9 @@ class GPT(nn.Module):
         # there are only 50257 unique GPT-2 tokens; extend to nearest multiple of 128 for efficiency.
         # suggested by @Grad62304977, originates from Karpathy's experiments.
         self.vocab_size = next_multiple_of_n(vocab_size, n=128)
+        # Set only by the evaluation sweep (train_gpt_rtx.py): validation then returns the loss at each of
+        # these softmax temperatures. None is the plain loss, which the official validation uses.
+        self.eval_temperatures: tuple[float, ...] | None = None
 
         # Prefix-token lookup table for prefix token prediction. Allocated here, but filled
         # after the clock starts (see "start the clock") so the build is charged to training
@@ -826,8 +829,11 @@ class GPT(nn.Module):
                 # the 0..23 the softcap leaves, so a dropped token contributes nothing to the softmax.
                 dropped = (self.canon_mask[input_seq[lo:hi], :, None] >> shifts & 1).view(logits.shape).bool()
                 logits = logits.masked_fill(dropped, -60.0)
-                slab_losses.append(F.cross_entropy(logits, target_seq[lo:hi], reduction="none"))
-            loss_per_token = torch.cat(slab_losses)
+                if self.eval_temperatures is None:
+                    slab_losses.append(F.cross_entropy(logits, target_seq[lo:hi], reduction="none"))
+                else:  # the evaluation sweep: [temperatures, rows]
+                    slab_losses.append(cross_entropy_at_temperatures(logits, target_seq[lo:hi], self.eval_temperatures))
+            loss_per_token = torch.cat(slab_losses, dim=-1)
         return loss_per_token
 
     # -------------------------------------------------------------------------

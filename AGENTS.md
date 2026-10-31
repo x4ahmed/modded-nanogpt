@@ -6,6 +6,7 @@
 - Preserve the RTX adaptation and unrelated user changes. Do not restore old v1 plans.
 - User permits commits and pushes to the current remote branch. Never force-push.
 - Do not claim GPU validation from CPU tests. The user runs GPU checks on the cluster.
+- Never SSH/scp to the cluster; give the user the command and ask them to paste the output.
 - Update this file after meaningful changes, test results, or decisions, before handoff.
 - Replace stale summaries rather than appending a diary. Keep under 100 lines.
 - Keep only current settings, verified results, blockers, and next steps here.
@@ -14,7 +15,8 @@
 
 ## Goal and repository
 - Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
-- Branch: rtx-local-v2. Remote: https://github.com/x4ahmed/modded-nanogpt.
+- Frozen local branch: baseline (5be1ba0); active: experiment/eval-sweep, branched from baseline.
+- Every idea gets its own branch from baseline and is tested alone; never merge or stack wins (user, 2026-10-30).
 - Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
 - Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
@@ -30,10 +32,10 @@
 - Keep validation packing fixed across local comparisons; do not claim upstream metric parity.
 - Full default schedule: 1194 optimizer updates. Remove RTX_MAX_STEPS for full runs.
 - Leave NUM_SCHEDULED_ITERATIONS unset; short tests truncate, never rescale the schedule.
-- Notion's existing seed plan is 999, 1000, 1001, 1002, 1003; 999 complete, four pending.
+- Seeds 999, 1000, 1001, 1002, 1003 completed; W&B verified 2026-10-21 (see docs/baseline-five-seeds.md).
 - Training log is logs/<generated UUID>.txt; capture console separately for warnings.
 
-## Last verified state (2026-10-18)
+## Last verified state (2026-10-21)
 - Code commit f466280 fixed the observed fused-MLP NaNs on the user's 5090.
 - Narrow 128-column MLP tiles use masked pointer stores, forward/backward, both layouts.
 - FP8 math/scales and model structure were retained; wide-tile path retains descriptor stores.
@@ -43,22 +45,35 @@
 - Validation loss after two updates: 8.883883 (not a convergence/baseline result).
 - Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
 - Twenty-one CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
-- First full pilot completed: seed 999, launch commit 9f0dfb9, 1194/1194 updates.
-- Pilot final validation loss 3.294856; recorded training time 837067 ms (13m57.067s).
-- Pilot warmup 95s (separate); peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
-- Pilot log: logs/7911de55-2adc-4ef7-b53a-a2a5db3e2edb.txt; predates W&B integration.
-- Supplied pilot output has finite logged losses and no canonical-mask fallback warning.
-- Evidence of learning/completion, not proof of upstream parity or multi-seed stability.
+- Pilot (seed 999, 9f0dfb9: 3.294856, 837.1 s) is superseded by the five-seed baseline and excluded from statistics.
+- Full runs: warmup ~95 s untimed; peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
 
 ## Open issue and next steps
-- Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
-- canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
-- Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
-- Continue tracking mask warnings; never silently exclude mask overhead from timings.
-- Keep training code/settings fixed; finish seeds 1000-1003. Report mean and sample SD (n-1).
-- One full pilot exists; no statistically established v2 baseline yet.
-- Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
-- Progress seed-results table: https://www.notion.so/3cb0b758a24e81faa372fac85828c1a0 (1/5 complete).
+- Active: evaluation sweep (this branch; eval-only, training and the official final validation unchanged).
+  After the final_val_loss line, train_gpt_rtx.py eval_sweep re-scores the final weights: short window +0/2/4/6
+  and long +4 blocks (mask only, as the record's long-window extension), each at temperatures 0.90-1.10 from one
+  forward (model eval_temperatures). Lines EVAL_SWEEP ...; the (0,0)/1.00 entry must reproduce final_val_loss.
+  docs/eval-sweep.md. W&B eval-sweep-1gpu-seed-<seed>. Short runs (smoke) sweep 2 window pairs on 2 chunks.
+- Value: same weights for every variant, so no seed noise; any gain is free on 8xH100 (~164 ms/millinat).
+- 2026-11-01: CPU suite passes; 5090 smoke + full run (seed 999) pending.
+- experiment/layer-smear: smoke FAILED (non-finite layer_smear grad at first warmup backward; full run NaN from
+  step 25). Diagnosis on that branch (tests/debug_layer_smear.py). Its pair's baseline run: 3.294617 / 837.222 s.
+- experiment/qk-whole (whole-matrix Q/K whitening): seed 999 3.294659, -0.0006 (neutral). STOPPED (user).
+- experiment/vo-heads (per-head V/O whitening): seed 999 3.307629, +0.0124 loss. STOPPED. Coarser whitening wins there.
+- experiment/gram-ns-mlp (Gram NS for MLP whitening, other agent's branch): diagnostic pass; bank 21% faster on the
+  5090 (2.2 s/run), ~5% at H100 per-GPU size (<= 0.08 s/run). Not worth it upstream; training run not done.
+- experiment/async-uploads (port-only host-sync fix), pair 2026-10-29: -14.15 s (-1.71%), loss unchanged. WIN;
+  kept on its own branch (not merged). It does not transfer: the 8xH100 record already uploads this way.
+- Stopped: record_late sampled softmax (1 seed: +0.0064, -1.7 s); 5 seeds vs 3.2949 / 861.6 s: Gated DeltaNet
+  +0.0041 / +8.2%, block AttnRes +0.036 / +10%, minimal readout +0.010 / +0.6%, bigram prior +0.0025 / +0.85%.
+- Screening rule (2026-10-22): one seed per idea; five seeds only if it beats the baseline by more than 0.002.
+- Canonical-mask worker once died (wait status 9) in a smoke test, never in full runs; wait() SIGKILLs after 60 s.
+  Mask wait/rebuild is timed: keep tracking mask warnings; never exclude mask overhead from timings.
+- Five-seed baseline at 5be1ba0: loss 3.2948572 ± 0.00104874; training 861.635 ± 1.608645 s (sample SD).
+- All five completed 1194 updates, memory gate passed, no reported mask fallback; pilots excluded.
+- Compare candidates on the same seeds/settings; session variance is not cross-session variance.
+- Notion: Experiment 1-4 pages under Progress; Ideas scoreboard rows 1-4 (5-seed means), rows 5-8 one seed (2026-10-30).
+- Mean loss is 0.0148572 above upstream ≤3.28; no seed meets target. Capacity/eval differences are not isolated.
 
 ## Verification commands
 - GPU diagnostics: python -u tests/diagnose_rtx5090.py
@@ -80,4 +95,4 @@
 - run_rtx.sh auto-uploads to i-learn/speedrun only after successful non-preflight runs.
 - Uses ~/venvs/wandb-upload/bin/python (override WANDB_UPLOAD_PYTHON); RTX_WANDB_UPLOAD=0 opts out.
 - Launcher saves console log and captures launch commit/seed; upload failure retains local results.
-- Launcher names W&B runs baseline-1gpu-seed-<seed>; repeat names do not overwrite distinct run IDs.
+- Launcher names W&B runs baseline-1gpu-seed-<seed> (eval-sweep-... on this branch); repeats keep distinct run IDs.

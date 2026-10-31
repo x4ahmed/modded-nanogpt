@@ -10,6 +10,15 @@ def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
 
 
+def cross_entropy_at_temperatures(logits: Tensor, targets: Tensor, temperatures) -> Tensor:
+    """Per-row cross-entropy of the same logits at each softmax temperature: [len(temperatures), rows].
+
+    For the evaluation sweep (train_gpt_rtx.py), which scores one forward at several temperatures;
+    temperature 1.0 is exactly the plain loss.
+    """
+    return torch.stack([F.cross_entropy(logits / t, targets, reduction="none") for t in temperatures])
+
+
 class CastedLinearT(nn.Module):
     """
     Linear layer with transposed weight storage (in_features, out_features) which

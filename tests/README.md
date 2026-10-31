@@ -49,3 +49,10 @@ RTX narrow-tile MLP outputs now use masked pointer stores in both directions.
 The FP8 math, scales, shapes and model structure are unchanged. This bypasses
 the suspect descriptor-store epilogue; GPU results must verify the repair.
 CPU routing/coverage checks: `python -m unittest discover -s tests -p test_mlp_store_contract.py`.
+
+## Evaluation sweep
+
+GPU: `python -u tests/check_rtx5090.py`; after the final validation its output must include two
+`EVAL_SWEEP ws_short=...` blocks (short runs sweep two window pairs on two chunks). CPU:
+`python -m unittest discover -s tests -p test_eval_sweep.py` (temperature arithmetic, official path
+unchanged, sweep after the summary line). See `docs/eval-sweep.md`.

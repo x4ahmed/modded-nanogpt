@@ -25,6 +25,7 @@ from track_1_short.run_log import log_environment, read_source, start_run_log
 code = read_source(sys.argv[0])
 
 import copy
+import dataclasses
 import gc
 import time
 
@@ -37,6 +38,7 @@ from torch import nn
 
 from track_1_short.canonical_mask import BackgroundCanonicalMask
 from track_1_short.config import (
+    BLOCK_SIZE,
     LR_COOLDOWN_FRAC,
     SPLIT_EMBED_STAGE,
     TRAINING_STAGES,
@@ -120,6 +122,52 @@ class Trainer:
         self.uncompiled.quantize_attn_fp8()
         self.uncompiled.quantize_mlp_fp8(refresh_lm=do_adam)
         return loss_sum
+
+
+# The evaluation sweep: untimed variants of the final validation, run after its summary line, so the
+# official final_val_loss and training time are untouched. Each window pair (short, long attention window
+# in blocks, as offsets from the official final-validation windows) is scored at every softmax temperature
+# from one forward pass. The first pair is the official one, so its 1.00 entry reproduces final_val_loss.
+# The record widens only the long windows for the final validation (13 -> WS_POST_YARN_EXT blocks, mask
+# only); the sweep tries the short windows too, and a wider long window.
+EVAL_SWEEP_WINDOW_OFFSETS = ((0, 0), (2, 0), (4, 0), (6, 0), (0, 4))
+EVAL_SWEEP_TEMPERATURES = (0.90, 0.95, 0.98, 1.00, 1.02, 1.05, 1.10)
+# Short runs (smoke tests) exercise every code path on the first two window pairs and this many chunks.
+EVAL_SWEEP_SHORT_RUN_CHUNKS = 2
+
+
+def eval_sweep(model, uncompiled, training_manager, args, val_seq, staging, device, print0, flush_log,
+               official_loss: float, full_run: bool):
+    """Score the evaluation-time variants on the final weights (see EVAL_SWEEP_WINDOW_OFFSETS)."""
+    official = (training_manager.ws_short, training_manager.ws_long)
+    offsets = EVAL_SWEEP_WINDOW_OFFSETS if full_run else EVAL_SWEEP_WINDOW_OFFSETS[:2]
+    batches = list(validation_batches(args.val_files, args.val_tokens, val_seq, staging))
+    if not full_run:
+        batches = batches[:EVAL_SWEEP_SHORT_RUN_CHUNKS]
+    base = training_manager.get_forward_args()
+    results = {}
+    uncompiled.eval_temperatures = EVAL_SWEEP_TEMPERATURES
+    model.eval()
+    with torch.no_grad():
+        for d_short, d_long in offsets:
+            ws_short, ws_long = official[0] + d_short, official[1] + d_long
+            cfg = dataclasses.replace(base, ws_short=ws_short * BLOCK_SIZE, ws_long=ws_long * BLOCK_SIZE)
+            total = torch.zeros(len(EVAL_SWEEP_TEMPERATURES), dtype=torch.float32, device=device)
+            for batch in batches:
+                masks = build_window_masks(batch.cum_seqlens, val_seq, cfg.ws_short, cfg.ws_long)
+                total += model(batch.inputs, batch.targets, batch.cum_seqlens, batch.ngram_ids, cfg,
+                               window_masks=masks).mean(dim=-1)
+            for t, loss in zip(EVAL_SWEEP_TEMPERATURES, (total / len(batches)).tolist()):
+                results[ws_short, ws_long, t] = loss
+                print0(f"EVAL_SWEEP ws_short={ws_short} ws_long={ws_long} temperature={t:.2f} val_loss={loss:.6f}",
+                       console=True)
+            flush_log()
+    uncompiled.eval_temperatures = None
+    if full_run:
+        reproduced = results[(*official, 1.00)]
+        status = "ok" if abs(reproduced - official_loss) < 1e-4 else "MISMATCH"
+        print0(f"EVAL_SWEEP official={official_loss:.6f} reproduced={reproduced:.6f} {status}", console=True)
+        flush_log()
 
 
 def main():
@@ -322,6 +370,8 @@ def main():
     print0(f"final_val_loss={val_loss.item():.6f} training_time_ms={training_time_ms:.0f} "
            f"peak_memory_allocated={gib(torch.cuda.max_memory_allocated())}", console=True)
     flush_log()
+    eval_sweep(model, uncompiled, training_manager, args, val_seq, staging, device, print0, flush_log,
+               official_loss=val_loss.item(), full_run=full_run)
     dist.destroy_process_group()
 
 
