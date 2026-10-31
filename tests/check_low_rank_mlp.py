@@ -45,7 +45,9 @@ def main():
     dpre_amax = torch.zeros(1, device="cuda")
 
     def forward(x, up, p):
-        x_row, x_t = quantize_dual_layout_fused(x.flatten(0, 1), x_s, torch.float8_e4m3fn)
+        # Match GPT.forward: these are cached operands, not a second autograd
+        # path. The custom MLP backward returns dx through the original x below.
+        x_row, x_t = quantize_dual_layout_fused(x.detach().flatten(0, 1), x_s, torch.float8_e4m3fn)
         # The production method substitutes all A-specific entries (3,4,7,8).
         fp8_args = (up_row, x_s * up_s, x_row, None, None, post_s, post_amax,
                     None, None, x_t, x_s, up_col, up_s, g_s, dpre_s, dpre_amax, p)

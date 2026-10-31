@@ -14,6 +14,24 @@ from track_1_short.model.low_rank import LowRankParallelDown
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@torch.library.custom_op("low_rank_test::transpose_without_autograd", mutates_args=())
+def transpose_without_autograd(src: torch.Tensor) -> torch.Tensor:
+    """Like the FP8 layout helper: intentionally no autograd registration."""
+    return src.T.contiguous().clone()
+
+
+class CacheOnlyMLP(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, up, p, row_cache, transposed_cache):
+        ctx.save_for_backward(x, up, p)
+        return x * up * p
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, up, p = ctx.saved_tensors
+        return grad * up * p, (grad * x * p).sum((0, 1)), (grad * x * up).sum(), None, None
+
+
 def extract(relative, classes):
     """Exercise actual optimizer/tail methods without importing CUDA-only kernels."""
     tree = ast.parse((ROOT / relative).read_text())
@@ -32,6 +50,36 @@ def extract(relative, classes):
 
 
 class LowRankMathTests(unittest.TestCase):
+    def test_gpu_check_input_cache_has_no_autograd_edge(self):
+        # Exercise the actual focused-check wrapper and quantization helper on
+        # CPU, with a real custom transpose op that deliberately has no backward.
+        # A differentiable layout mock would hide the missing-detach regression.
+        check = ast.parse((ROOT / "tests/check_low_rank_mlp.py").read_text())
+        main = next(n for n in check.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        forward = next(n for n in main.body if isinstance(n, ast.FunctionDef) and n.name == "forward")
+        kernel = ast.parse((ROOT / "track_1_short/perf/kernels/mlp.py").read_text())
+        quantize = next(n for n in kernel.body if isinstance(n, ast.FunctionDef) and n.name == "quantize_dual_layout_fused")
+        seen = []
+
+        def mlp(x, up, args):
+            seen.extend((args[2], args[9]))
+            return CacheOnlyMLP.apply(x, up, args[-1], args[2], args[9])
+
+        env = dict(torch=torch, part=SimpleNamespace(mlp=mlp))
+        for name in ("x_s", "g_s", "up_s", "up_row", "up_col", "post_s", "post_amax", "dpre_s", "dpre_amax"):
+            env[name] = torch.tensor(1.)
+        exec(compile(ast.Module(body=[quantize, forward], type_ignores=[]), "focused_check_regression", "exec"), env)
+        x = torch.randn(1, 3, 4, requires_grad=True)
+        up = torch.randn(4, requires_grad=True)
+        p = torch.tensor(1.125, requires_grad=True)
+        with patch.object(torch.ops, "nanogpt", SimpleNamespace(glue_fp8_t=transpose_without_autograd)):
+            out = env["forward"](x, up, p)
+            dx, dup, dp = torch.autograd.grad(out.sum(), (x, up, p))
+        self.assertTrue(all(not cache.requires_grad and cache.grad_fn is None for cache in seen))
+        torch.testing.assert_close(dx, (up * p).expand_as(x))
+        torch.testing.assert_close(dup, (x * p).sum((0, 1)))
+        torch.testing.assert_close(dp, (x * up).sum())
+
     def test_production_autograd_with_rectangular_output_and_folded_lambda(self):
         env = extract("track_1_short/perf/kernels/mlp.py", {
             "FusedLinearReLUSquareFunction": None, "FP8LowRankReadout": None})

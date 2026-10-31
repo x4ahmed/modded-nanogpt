@@ -56,6 +56,9 @@
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 - Current CPU checks cover algebra, AOT autograd, initialization/RNG, reset, replica
   ownership/reduction, pair ordering/failure handling and existing launch/upload behavior.
+- First cluster attempt stopped in the focused test before training: its FP8 input
+  cache was attached to autograd. Fixed to detach like GPT.forward; a real custom-op
+  CPU regression reproduces the old failure and checks preserved input gradients.
 - RTX 5090 numerical checks, memory, convergence and timing remain pending. No H100 test.
 - Frozen five-seed historical baseline: loss 3.2948572 +/- 0.00104874 SD;
   time 861.635 +/- 1.608645 s SD. Use fresh paired controls for new comparisons.
