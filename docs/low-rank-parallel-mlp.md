@@ -71,3 +71,11 @@ The CPU custom-autograd test substitutes exact arithmetic for GPU kernels; it ch
 rectangular shapes and folded-lambda gradients, not FP8 numerical accuracy.
 GPU checks: `python -u tests/check_low_rank_mlp.py` then `python -u tests/check_rtx5090.py`.
 GPU precision, full-model memory, convergence and end-to-end timing remain cluster checks.
+
+The focused check uses production bootstrap scales and identical eager/compiled inputs.
+An independent quantized PyTorch oracle checks all outputs and gradients at 3% relative L2.
+The BF16 comparison retains 10% output / 15% tensor-gradient limits. For the scalar
+post-lambda, a random signed dot product can nearly cancel, so its raw drift is printed
+as a diagnostic; a reference-aligned, non-cancelling probe gates BF16 parity at the original
+15% limit. Random scalar parity is still gated against the quantized oracle. These are
+numerical screening tolerances, not evidence of convergence or quality equivalence.

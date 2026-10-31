@@ -56,9 +56,12 @@
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 - Current CPU checks cover algebra, AOT autograd, initialization/RNG, reset, replica
   ownership/reduction, pair ordering/failure handling and existing launch/upload behavior.
-- First cluster attempt stopped in the focused test before training: its FP8 input
-  cache was attached to autograd. Fixed to detach like GPT.forward; a real custom-op
-  CPU regression reproduces the old failure and checks preserved input gradients.
+- Focused check fixes: detach FP8 caches like production; use production scale constants.
+- Random-probe scalar FP8/BF16 parity hit 16%; no training ran. The check now gates
+  every output/gradient against an independent quantized oracle (3%), retains vector
+  BF16 limits (10%/15%), and tests scalar BF16 parity on an aligned energy probe (15%).
+  Random scalar drift is still printed. Local quantization simulation reproduced
+  cancellation sensitivity; this does not establish RTX kernel correctness.
 - RTX 5090 numerical checks, memory, convergence and timing remain pending. No H100 test.
 - Frozen five-seed historical baseline: loss 3.2948572 +/- 0.00104874 SD;
   time 861.635 +/- 1.608645 s SD. Use fresh paired controls for new comparisons.
