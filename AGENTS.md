@@ -52,8 +52,9 @@
 - Active: layer smear (model, transferable). Every layer starts with x_t += w_i * x_(t-1) (model/layers.py
   token_shift), w_i a zero-init 768-vector per layer (layer_smear, replicated Adam, lr_mul 1, no decay).
   Aims at loss; cost is one pointwise op per layer. docs/layer-smear.md. Log LAYER_SMEAR; W&B layer-smear-...
-- Screen: seed 999 pair in one allocation, baseline branch then this one: loss win < -0.002 vs the pair's
-  baseline (and prior 3.294980/3.295181/3.295634); time vs the pair's baseline = the cost.
+- Pair 2026-11-01 (tujestpolin, seed 999): baseline 3.295848 / 836.070 s; layer smear 3.294911 / 869.799 s.
+  Loss -0.0009 vs the pair, -0.0003 vs the mean of 5 baseline seed-999 runs (3.295252): neutral. Time +4.0%
+  (unfused opaque op). Recommend stop; user decision pending.
 - 2026-11-01 smoke FAILED (layer_smear grad non-finite, first backward); full run NaN, stopped. Baseline run
   in that allocation: 3.294617 / 837.222 s. debug_layer_smear.py: all g/x finite and small, smoke passes with
   an opaque op => compiler bug. token_shift is now a custom op (unfused: screen time overstates cost).
