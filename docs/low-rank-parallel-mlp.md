@@ -32,7 +32,30 @@ training is untested. One-GPU CPU tests do not establish an H100 speedup.
 The selected down projection uses 36.4% fewer multiply-accumulates. Including its unchanged
 up projection, that MLP uses 18.2% less matrix arithmetic: about 1.65% across all eleven MLPs.
 Extra quantization, smaller GEMMs and factor optimizer work can erase the saving. Measure
-the complete run; no speed or quality improvement is established yet.
+the complete run; the first pair below shows no useful speed or quality improvement.
+
+## First paired result (seed 999)
+
+User-supplied cluster report: `logs/pairs/20261101T004642Z/seed-999.json`, status complete.
+Both runs used the same local settings and 1194 updates; baseline ran first.
+
+| Metric | Baseline (`5be1ba0`) | Low rank (`52a1934`) | Candidate minus baseline |
+| --- | ---: | ---: | ---: |
+| Final validation loss | 3.295196 | 3.297256 | +0.002060 (worse) |
+| Training seconds | 835.291 | 835.086 | -0.205 (-0.02454%) |
+| Peak allocated GiB | 19.99 | 20.02 | +0.03 |
+| Memory headroom GiB | 5.81 | 6.00 | +0.19 |
+| Memory gate | PASS | PASS | Both above 1.5 GiB |
+
+Baseline console: `logs/run-20261101T004642Z-3478689.console.txt`.
+Candidate console: `logs/run-20261101T010302Z-3481263.console.txt`.
+Candidate identity: `layer=8 slot=11 projection=down rank=384 precision=fp8`.
+
+Interpretation: the implementation runs, but a 0.205-second saving over roughly
+835 seconds is not persuasive evidence of a speedup, and observed loss is worse.
+One pair cannot estimate variance or establish statistical significance. Recommend
+keeping the baseline and not expanding this configuration to five seeds yet.
+The cause of the negligible gain needs profiling; overhead is a hypothesis, not a finding.
 
 ## Run one fresh baseline/candidate pair
 
@@ -52,8 +75,9 @@ The runner refuses a dirty checkout or a moved baseline. It clears stale RTX/sho
 sets the frozen local settings and runs these steps, stopping on failure:
 
 1. Focused low-rank FP8 eager/compiled forward/backward check.
-2. Full-model smoke: all-stage warmup, reset, two updates, full validation and memory gate.
-3. Full baseline seed 999, then full candidate seed 999, in the same allocation.
+2. Focused optimizer check: rank-384 Gram/polynomial kernels and complete factor updates.
+3. Full-model smoke: all-stage warmup, reset, two updates, full validation and memory gate.
+4. Full baseline seed 999, then full candidate seed 999, in the same allocation.
 
 It returns to the experiment branch. W&B uploads happen after each successful training run:
 `baseline-1gpu-seed-999` and `low-rank-parallel-r384-1gpu-seed-999`.
@@ -71,7 +95,8 @@ The CPU custom-autograd test substitutes exact arithmetic for GPU kernels; it ch
 rectangular shapes and folded-lambda gradients, not FP8 numerical accuracy.
 GPU checks: `python -u tests/check_low_rank_mlp.py`, `python -u tests/check_low_rank_optimizer.py`,
 then `python -u tests/check_rtx5090.py`. The paired runner executes all three gates.
-GPU precision, full-model memory, convergence and end-to-end timing remain cluster checks.
+The first RTX pair completed with both memory gates passing. Multi-seed quality/time
+uncertainty and transfer to eight H100s remain unmeasured.
 
 The focused check uses production bootstrap scales and identical eager/compiled inputs.
 An independent quantized PyTorch oracle checks all outputs and gradients at 3% relative L2.
@@ -97,4 +122,5 @@ optimizer equations remain unchanged; baseline-bank and H100 launches stay intac
 Offline Triton 3.6 compilation for SM120 reproduced the old size and measured
 49152 bytes with two stages. This verifies compilation resources, not GPU execution.
 The new optimizer gate checks Gram/polynomial parity and zero/nonzero full updates
-for both factors before full-model warmup. Full smoke and paired runs remain pending.
+for both factors before full-model warmup. The paired runner completed successfully
+at 52a1934, including its preceding checks; see the first paired result above.

@@ -36,7 +36,7 @@
   and FP8-refresh capture. Optimization/averaging of factors differs from dense weights.
 - docs/low-rank-parallel-mlp.md owns details and limitations.
 - Theoretical saving: 18.2% of this MLP's matrix arithmetic, ~1.65% across all MLPs;
-  extra quantization/optimizer work can erase it. No measured gain yet.
+  first paired run shows no useful end-to-end gain (results below).
 
 ## Frozen local settings
 - One RTX 5090 (SM120, 32 GB); PORTABLE=1.
@@ -58,17 +58,21 @@
 - Current CPU checks cover algebra, AOT autograd, initialization/RNG, reset, replica
   ownership/reduction, pair ordering/failure handling and existing launch/upload behavior.
 - Focused check fixes: detach FP8 caches like production; use production scale constants.
-- Cluster 7fad82a: focused MLP PASS in eager/compiled mode; oracle output error
-  0.0309%, largest tensor-gradient error 0.0683%, scalar exact, BF16 eval exact.
-  Full smoke stopped compiling ANVIL XTX: shared memory 114688 > 101376 bytes.
+- Focused MLP PASS: oracle output error 0.0309%, largest tensor-gradient error
+  0.0683%, scalar exact, BF16 eval exact (eager and compiled).
 - Fix: rank-384 XTX on limited-shared-memory GPUs uses two pipeline stages (was four).
   Tiles, precision and optimizer equations unchanged; baseline/H100 launches preserved.
-  Offline Triton 3.6 SM120 compile reproduces 114688 -> 49152 bytes. CPU dispatch
-  checks pass; local GPU execution blocked by missing C compiler. Cluster rerun needed.
+  Offline Triton 3.6 SM120 compile reproduces 114688 -> 49152 bytes; cluster pair
+  subsequently completed at 52a1934. Full CPU suite: 43 tests passed.
 - Gates unchanged: quantized oracle 3%, BF16 output/gradients 10%/15%, aligned scalar
   15%. Random scalar BF16 drift is diagnostic (cancellation); quantized scalar gates.
   All parity failures print before a nonzero exit; full runs remain gated.
-- Full optimizer execution, full-model memory, convergence and timing pending. No H100 test.
+- User-supplied seed-999 pair 20261101T004642Z complete: baseline 5be1ba0 loss
+  3.295196 / 835.291 s; candidate 52a1934 loss 3.297256 / 835.086 s.
+  Delta: loss +0.002060, time -0.205 s (-0.02454%); memory PASS for both.
+  No useful speedup demonstrated; recommend retaining baseline, no five-seed expansion
+  of this configuration yet. One pair cannot establish variance or significance.
+  Full-model peak allocated: baseline 19.99 / candidate 20.02 GiB. No H100 test.
 - Frozen five-seed historical baseline: loss 3.2948572 +/- 0.00104874 SD;
   time 861.635 +/- 1.608645 s SD. Use fresh paired controls for new comparisons.
 - Prior architecture/optimizer ideas were not promoted: AttnRes, minimal readout,
