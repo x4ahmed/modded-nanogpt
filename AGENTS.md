@@ -54,9 +54,9 @@
   Aims at loss; cost is one pointwise op per layer. docs/layer-smear.md. Log LAYER_SMEAR; W&B layer-smear-...
 - Screen: seed 999 pair in one allocation, baseline branch then this one: loss win < -0.002 vs the pair's
   baseline (and prior 3.294980/3.295181/3.295634); time vs the pair's baseline = the cost.
-- 2026-11-01 smoke FAILED: layer_smear grad non-finite at the first warmup backward (forward loss finite);
-  the full run went NaN from step 25 (stopped). Same-allocation baseline run: 3.294617 / 837.222 s.
-- Diagnose: python -u tests/debug_layer_smear.py (opaque fp32 shift; per-layer |g|, residual report).
+- 2026-11-01 smoke FAILED (layer_smear grad non-finite, first backward); full run NaN, stopped. Baseline run
+  in that allocation: 3.294617 / 837.222 s. debug_layer_smear.py: all g/x finite and small, smoke passes with
+  an opaque op => compiler bug. token_shift is now a custom op (unfused: screen time overstates cost).
 - experiment/qk-whole (whole-matrix Q/K whitening): seed 999 3.294659, -0.0006 (neutral). STOPPED (user).
 - experiment/vo-heads (per-head V/O whitening): seed 999 3.307629, +0.0124 loss. STOPPED. Coarser whitening wins there.
 - experiment/gram-ns-mlp (Gram NS for MLP whitening, other agent's branch): diagnostic pass; bank 21% faster on the

@@ -29,6 +29,15 @@ It aims at the loss. On 8xH100 a lower loss becomes speed through fewer steps (~
 record's rate). Its cost is one pointwise operation per layer; if the compiler does not fuse it, it is a
 few percent of an 8xH100 step, and the loss gain must pay for that.
 
+## Implementation note: an opaque op
+
+Written as plain ops inside the compiled model, the shift gave `layer_smear` a non-finite gradient at
+the first backward on the RTX 5090 (smoke test, 2026-11-01), while `tests/debug_layer_smear.py` showed
+every incoming gradient and residual finite and small (largest |g| 0.018, largest weight gradient ~8):
+the compiled code was at fault, not the values. `token_shift` is now a custom op with a hand-written
+backward (the debug run with such an op passed the smoke test). The compiler cannot fuse it, so the
+time this screen measures overstates what a fused kernel would cost; if the loss wins, that comes next.
+
 ## Screen
 
 Seed 999, a pair in one allocation: the `baseline` branch, then this branch. Loss: a win needs more than

@@ -10,13 +10,46 @@ def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
 
 
+@torch.library.custom_op("nanogpt::token_shift", mutates_args=())
 def token_shift(x: Tensor, w: Tensor) -> Tensor:
     """x + w * (the previous position's x) along the sequence (dim 1); the first position sees zeros.
 
-    The padded shift is pointwise with an offset load, so the compiler can fuse it with its neighbours.
-    Like the input smear it does not stop at document boundaries.
+    An opaque op with a hand-written backward. Written as plain ops inside the compiled model, the
+    generated backward gave w a non-finite gradient on the RTX 5090 while every input was finite and
+    small; as this op it trains (tests/debug_layer_smear.py). The price: the compiler cannot fuse it with
+    its neighbours. Like the input smear it does not stop at document boundaries.
     """
-    return x + w * F.pad(x[:, :-1], (0, 0, 1, 0))
+    return torch.addcmul(x, F.pad(x[:, :-1], (0, 0, 1, 0)), w)
+
+
+@token_shift.register_fake
+def _(x, w):
+    return torch.empty_like(x)
+
+
+@torch.library.custom_op("nanogpt::token_shift_backward", mutates_args=())
+def _token_shift_backward(grad: Tensor, x: Tensor, w: Tensor) -> tuple[Tensor, Tensor]:
+    grad_x = grad.clone()
+    grad_x[:, :-1].addcmul_(grad[:, 1:], w)
+    acc = torch.promote_types(grad.dtype, torch.float32)  # bf16 products, summed in fp32
+    grad_w = (grad[:, 1:] * x[:, :-1]).sum(dim=(0, 1), dtype=acc)
+    return grad_x, grad_w.to(w.dtype)
+
+
+@_token_shift_backward.register_fake
+def _(grad, x, w):
+    return torch.empty_like(grad), torch.empty_like(w)
+
+
+def _token_shift_setup(ctx, inputs, output):
+    ctx.save_for_backward(*inputs)
+
+
+def _token_shift_grad(ctx, grad):
+    return _token_shift_backward(grad, *ctx.saved_tensors)
+
+
+token_shift.register_autograd(_token_shift_grad, setup_context=_token_shift_setup)
 
 
 class CastedLinearT(nn.Module):
