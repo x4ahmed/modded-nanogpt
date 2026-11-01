@@ -69,7 +69,8 @@ Compare the paired differences; historical timings are context only. Do not stac
 CPU: `python -m unittest discover -s tests -p 'test_*.py' -v`.
 The CPU custom-autograd test substitutes exact arithmetic for GPU kernels; it checks algebra,
 rectangular shapes and folded-lambda gradients, not FP8 numerical accuracy.
-GPU checks: `python -u tests/check_low_rank_mlp.py` then `python -u tests/check_rtx5090.py`.
+GPU checks: `python -u tests/check_low_rank_mlp.py`, `python -u tests/check_low_rank_optimizer.py`,
+then `python -u tests/check_rtx5090.py`. The paired runner executes all three gates.
 GPU precision, full-model memory, convergence and end-to-end timing remain cluster checks.
 
 The focused check uses production bootstrap scales and identical eager/compiled inputs.
@@ -80,10 +81,20 @@ as a diagnostic; a reference-aligned, non-cancelling probe gates BF16 parity at 
 15% limit. Random scalar parity is still gated against the quantized oracle. These are
 numerical screening tolerances, not evidence of convergence or quality equivalence.
 
-The 3.345% cluster output failure exposed an extra BF16 rounding in the test oracle.
+The earlier 3.345% output failure exposed an extra BF16 rounding in the test oracle.
 [Triton 3.6 promotes the ReLU maximum to FP32](https://github.com/triton-lang/triton/blob/v3.6.0/python/triton/language/core.py#L2337-L2342),
 so the square must go directly from FP32 to FP8. The oracle now matches this boundary.
 An exact CPU regression fails with the old oracle; a local arithmetic simulation
 showed ~3.30% output drift from that rounding alone (not an RTX kernel validation).
-The GPU check now probes this boundary explicitly and reports all parity failures
-before exiting unsuccessfully. No production arithmetic or tolerances changed.
+The corrected check passed on RTX 5090 at 7fad82a: output error 0.0309%, largest
+tensor-gradient error 0.0683%, scalar gradient and BF16 validation exact against
+their respective references. Eager and compiled checks both passed.
+
+The next gate exposed ANVIL XTX's rank-384 launch using 114688 shared-memory bytes;
+RTX 5090 permits 101376. Only this launch on limited-shared-memory GPUs now uses
+two pipeline stages instead of four. Tiles, reduction dimensions, precision and
+optimizer equations remain unchanged; baseline-bank and H100 launches stay intact.
+Offline Triton 3.6 compilation for SM120 reproduced the old size and measured
+49152 bytes with two stages. This verifies compilation resources, not GPU execution.
+The new optimizer gate checks Gram/polynomial parity and zero/nonzero full updates
+for both factors before full-model warmup. Full smoke and paired runs remain pending.

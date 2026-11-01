@@ -39,7 +39,8 @@ class PairedRunTests(unittest.TestCase):
                 if command[0] != "bash":
                     state["checks"].append(command)
                     return
-                self.assertEqual(len(state["checks"]), 2)
+                self.assertEqual([command[2] for command in state["checks"]], [
+                    "tests/check_low_rank_mlp.py", "tests/check_low_rank_optimizer.py", "tests/check_rtx5090.py"])
                 state["runs"].append(state["branch"])
                 if fail_candidate and state["branch"] == pair.EXPERIMENT:
                     raise subprocess.CalledProcessError(1, command)
@@ -98,6 +99,25 @@ class PairedRunTests(unittest.TestCase):
         self.assertAlmostEqual(result["loss_delta"], -.001)
         self.assertEqual(result["seconds_delta"], -5)
         self.assertAlmostEqual(result["time_change_percent"], -100 * 5 / 825)
+
+    def test_optimizer_check_failure_prevents_full_smoke_and_training(self):
+        def git(*args):
+            if args[0] == "branch":
+                return pair.EXPERIMENT
+            if args[0] == "status":
+                return ""
+            return pair.BASELINE_COMMIT
+
+        def run(command, **kwargs):
+            if command[2] == "tests/check_low_rank_optimizer.py":
+                raise subprocess.CalledProcessError(1, command)
+
+        with patch.object(pair, "git", git), patch.object(pair.subprocess, "run", side_effect=run) as calls, \
+                patch.object(sys, "argv", ["pair", "--seeds", "999"]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                pair.main()
+        self.assertEqual([call.args[0][2] for call in calls.call_args_list], [
+            "tests/check_low_rank_mlp.py", "tests/check_low_rank_optimizer.py"])
 
 
 if __name__ == "__main__":

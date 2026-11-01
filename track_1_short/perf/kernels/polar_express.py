@@ -235,6 +235,14 @@ def XTX_kernel(
     tl.store(c_ptrs_t, output.T, mask=c_mask_t)
 
 
+def xtx_num_stages(columns: int, shared_memory_limit: int) -> int:
+    # Triton 3.6 SM120: the rank-384 64x128x128 tile uses 114688 bytes
+    # with four stages, exceeding RTX 5090's 101376-byte limit. Two
+    # stages use 49152 bytes with the same tiles and reduction arithmetic.
+    # Preserve all baseline bank launches and the H100 configuration.
+    return 2 if columns == 384 and shared_memory_limit < 114688 else 4
+
+
 def XTX(A: torch.Tensor, out: torch.Tensor):
     """
     Launch Triton kernel to compute C = A.T @ A
@@ -265,6 +273,11 @@ def XTX(A: torch.Tensor, out: torch.Tensor):
     else:
         BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K = 64, 128, 128
         num_stages, num_warps = 4, 8
+
+    if K == 384:
+        props = torch.cuda.get_device_properties(A.device)
+        limit = getattr(props, "shared_memory_per_block_optin", props.shared_memory_per_block)
+        num_stages = xtx_num_stages(K, limit)
 
     grid = (batch_size * triton.cdiv(K, BLOCK_SIZE_M) * triton.cdiv(K, BLOCK_SIZE_N),)
     XTX_kernel[grid](

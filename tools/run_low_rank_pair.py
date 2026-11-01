@@ -85,6 +85,7 @@ def main():
     # Compile/gradient checks and full-model smoke are gates, outside both timers.
     env = run_env(args.seeds[0])
     subprocess.run([sys.executable, "-u", "tests/check_low_rank_mlp.py"], cwd=ROOT, env=env, check=True)
+    subprocess.run([sys.executable, "-u", "tests/check_low_rank_optimizer.py"], cwd=ROOT, env=env, check=True)
     subprocess.run([sys.executable, "-u", "tests/check_rtx5090.py", "--seed", str(args.seeds[0])],
                    cwd=ROOT, env=env, check=True)
     folder = ROOT / "logs" / "pairs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

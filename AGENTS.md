@@ -50,21 +50,25 @@
 
 ## Commands and results
 - Pair: python -u tools/run_low_rank_pair.py --seeds 999 (clean experiment checkout).
-- Runner gates on focused CUDA check + full-model smoke, runs baseline then candidate,
+- Runner gates on MLP check + optimizer check + full-model smoke, runs baseline then candidate,
   saves commits/results/deltas in logs/pairs/<UTC>/seed-999.json, restores experiment.
-- GPU-only checks: python -u tests/check_low_rank_mlp.py; python -u tests/check_rtx5090.py.
+- GPU checks: tests/check_low_rank_mlp.py, tests/check_low_rank_optimizer.py,
+  then tests/check_rtx5090.py (each via python -u).
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 - Current CPU checks cover algebra, AOT autograd, initialization/RNG, reset, replica
   ownership/reduction, pair ordering/failure handling and existing launch/upload behavior.
 - Focused check fixes: detach FP8 caches like production; use production scale constants.
-- Latest cluster gate: quantized-reference output differed 3.345%; no training ran.
-  The oracle incorrectly rounded ReLU^2 to BF16 before FP8; Triton 3.6 computes the
-  square in FP32. Corrected and regression-tested; local simulation showed ~3.30%
-  drift from that extra rounding alone. Exact GPU epilogue probe awaits execution.
+- Cluster 7fad82a: focused MLP PASS in eager/compiled mode; oracle output error
+  0.0309%, largest tensor-gradient error 0.0683%, scalar exact, BF16 eval exact.
+  Full smoke stopped compiling ANVIL XTX: shared memory 114688 > 101376 bytes.
+- Fix: rank-384 XTX on limited-shared-memory GPUs uses two pipeline stages (was four).
+  Tiles, precision and optimizer equations unchanged; baseline/H100 launches preserved.
+  Offline Triton 3.6 SM120 compile reproduces 114688 -> 49152 bytes. CPU dispatch
+  checks pass; local GPU execution blocked by missing C compiler. Cluster rerun needed.
 - Gates unchanged: quantized oracle 3%, BF16 output/gradients 10%/15%, aligned scalar
   15%. Random scalar BF16 drift is diagnostic (cancellation); quantized scalar gates.
   All parity failures print before a nonzero exit; full runs remain gated.
-- RTX 5090 numerical checks, memory, convergence and timing remain pending. No H100 test.
+- Full optimizer execution, full-model memory, convergence and timing pending. No H100 test.
 - Frozen five-seed historical baseline: loss 3.2948572 +/- 0.00104874 SD;
   time 861.635 +/- 1.608645 s SD. Use fresh paired controls for new comparisons.
 - Prior architecture/optimizer ideas were not promoted: AttnRes, minimal readout,
