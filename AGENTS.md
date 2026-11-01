@@ -57,8 +57,8 @@
 - Value: same weights for every variant, so no seed noise; any gain is free on 8xH100 (~164 ms/millinat).
 - Seed 999 (2026-11-01, tujestpolin): official 3.294663 / 827.467 s, reproduced ok. Best temperature ~0.99
   (-0.0003 at most); short 8/10/12 blocks +0.006/+0.042/+0.056; long 24 +0.002. Record's eval settings win. DONE.
-- experiment/layer-smear: smoke FAILED (non-finite layer_smear grad at first warmup backward; full run NaN from
-  step 25). Diagnosis on that branch (tests/debug_layer_smear.py). Its pair's baseline run: 3.294617 / 837.222 s.
+- experiment/layer-smear: first try went NaN (compiler bug); with an unfused shift, seed 999 pair 3.2949 vs
+  3.2958 baseline (-0.0009, neutral), 869.8 vs 836.1 s (+4.0%). Details on that branch (Notion row 9).
 - experiment/qk-whole (whole-matrix Q/K whitening): seed 999 3.294659, -0.0006 (neutral). STOPPED (user).
 - experiment/vo-heads (per-head V/O whitening): seed 999 3.307629, +0.0124 loss. STOPPED. Coarser whitening wins there.
 - experiment/gram-ns-mlp (Gram NS for MLP whitening, other agent's branch): diagnostic pass; bank 21% faster on the
