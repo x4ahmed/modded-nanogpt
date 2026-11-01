@@ -55,7 +55,8 @@
   forward (model eval_temperatures). Lines EVAL_SWEEP ...; the (0,0)/1.00 entry must reproduce final_val_loss.
   docs/eval-sweep.md. W&B eval-sweep-1gpu-seed-<seed>. Short runs (smoke) sweep 2 window pairs on 2 chunks.
 - Value: same weights for every variant, so no seed noise; any gain is free on 8xH100 (~164 ms/millinat).
-- 2026-11-01: CPU suite passes; 5090 smoke + full run (seed 999) pending.
+- Seed 999 (2026-11-01, tujestpolin): official 3.294663 / 827.467 s, reproduced ok. Best temperature ~0.99
+  (-0.0003 at most); short 8/10/12 blocks +0.006/+0.042/+0.056; long 24 +0.002. Record's eval settings win. DONE.
 - experiment/layer-smear: smoke FAILED (non-finite layer_smear grad at first warmup backward; full run NaN from
   step 25). Diagnosis on that branch (tests/debug_layer_smear.py). Its pair's baseline run: 3.294617 / 837.222 s.
 - experiment/qk-whole (whole-matrix Q/K whitening): seed 999 3.294659, -0.0006 (neutral). STOPPED (user).
