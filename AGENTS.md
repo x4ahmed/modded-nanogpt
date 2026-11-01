@@ -49,15 +49,13 @@
 - Full runs: warmup ~95 s untimed; peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
 
 ## Open issue and next steps
-- Active: layer smear (model, transferable). Every layer starts with x_t += w_i * x_(t-1) (model/layers.py
-  token_shift), w_i a zero-init 768-vector per layer (layer_smear, replicated Adam, lr_mul 1, no decay).
-  Aims at loss; cost is one pointwise op per layer. docs/layer-smear.md. Log LAYER_SMEAR; W&B layer-smear-...
+- Layer smear (this branch): every layer starts with x_t += w_i * x_(t-1) (model/layers.py token_shift), w_i a
+  zero-init 768-vector per layer (replicated Adam, no decay). docs/layer-smear.md; W&B layer-smear-...
 - Pair 2026-11-01 (tujestpolin, seed 999): baseline 3.295848 / 836.070 s; layer smear 3.294911 / 869.799 s.
   Loss -0.0009 vs the pair, -0.0003 vs the mean of 5 baseline seed-999 runs (3.295252): neutral. Time +4.0%
   (unfused opaque op). Recommend stop; user decision pending.
-- 2026-11-01 smoke FAILED (layer_smear grad non-finite, first backward); full run NaN, stopped. Baseline run
-  in that allocation: 3.294617 / 837.222 s. debug_layer_smear.py: all g/x finite and small, smoke passes with
-  an opaque op => compiler bug. token_shift is now a custom op (unfused: screen time overstates cost).
+- First smoke FAILED (non-finite layer_smear grad; baseline run then 3.294617 / 837.222 s). debug_layer_smear.py:
+  g/x finite and small, smoke passes as an opaque op => compiler bug; token_shift is now a custom op (unfused).
 - experiment/qk-whole (whole-matrix Q/K whitening): seed 999 3.294659, -0.0006 (neutral). STOPPED (user).
 - experiment/vo-heads (per-head V/O whitening): seed 999 3.307629, +0.0124 loss. STOPPED. Coarser whitening wins there.
 - experiment/gram-ns-mlp (Gram NS for MLP whitening, other agent's branch): diagnostic pass; bank 21% faster on the
