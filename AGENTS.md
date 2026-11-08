@@ -77,6 +77,7 @@
   kept on its own branch). Gram NS: little total-run potential.
 - Exp 2 (minimal readout) already started its readout last-heavy (x at 0.9), but only the readout.
 - Phase 2 ideas (Notion, 2026-11-05): AttnRes init (this branch), mHC, vocabulary pruning.
+  Notion "Ideas vs Results" Phase 2 scoreboard: row 1 = zero-init pair (added 2026-11-08).
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging
