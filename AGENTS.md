@@ -78,6 +78,12 @@
 - Prior architecture/optimizer ideas were not promoted: AttnRes, minimal readout,
   bigram output prior, DeltaNet, sampled taper, per-head V/O and whole Q/K whitening.
 - Async uploads showed a local-only timing gain; Gram NS showed little total-run potential.
+- Gated DeltaNet ran only on layer 5 (RTX_DELTANET_LAYER also allows 0/2; never run).
+
+## Notion (2026-11-04)
+- Ideas page: notes rewritten compactly for presenting; scoreboard of 5-seed/paired results.
+- WIKI > Tricks: upstream's biggest time-saving tricks (45 min -> 39.9 s), from README
+  record history and the #92 ablation (approx. values marked as such).
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging
