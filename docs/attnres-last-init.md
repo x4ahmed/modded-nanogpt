@@ -53,14 +53,18 @@ python -u tools/run_pair.py --seeds 999
 It runs the GPU smoke check (`tests/check_rtx5090.py`: warmup, reset, two updates, validation, memory
 gate, routing gradients and Adam updates of queries and biases), then the baseline, then the candidate.
 It writes `logs/pairs/<UTC>/seed-<seed>.json` and prints `PAIR_COMPLETE` with both losses, both times
-and the deltas. W&B names: `baseline-1gpu-seed-<seed>` and `block-attnres-last-b6-1gpu-seed-<seed>`.
+and the deltas. Neither arm uploads itself; afterwards the runner imports both logs to W&B as
+`baseline-for-attnres-last-init-1gpu-seed-<seed>` and `attnres-last-init-1gpu-seed-<seed>` (label =
+branch name without `experiment/`, or `--label`). A failed upload keeps local results and prints a retry.
 The runner is generic: copy it unchanged to later Phase 2 branches.
 
 ## Zero-init reference pair (Experiment 1 rerun)
 
 Experiment 1's five seeds ran before the pairing rule. Its seed-999 rerun is paired the same way, from
 `experiment/attention-residuals` (training code identical to 9655fc3): smoke check, baseline, then
-`RTX_ROUTING=block_attnres RTX_ATTNRES_BLOCK_SIZE=6 RTX_ATTNRES_INJECT=1 bash run_rtx.sh`.
+`RTX_ROUTING=block_attnres RTX_ATTNRES_BLOCK_SIZE=6 RTX_ATTNRES_INJECT=1 bash run_rtx.sh`, both with
+`RTX_WANDB_UPLOAD=0`, then two explicit uploads named `baseline-for-attnres-zero-init-1gpu-seed-999` and
+`attnres-zero-init-1gpu-seed-999` (the launchers would reuse the old, ambiguous names).
 
 ## Results
 

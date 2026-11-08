@@ -6,6 +6,11 @@ loss are compared only within that pair. Gate first: the candidate's GPU smoke c
 timers. The program loads before switching branches and imports only the standard library; it restores
 the candidate checkout even if a run fails. Commits, results and console logs are kept in
 logs/pairs/<UTC>/seed-<seed>.json. No jobs are submitted. Copy this file unchanged to each Phase 2 branch.
+
+W&B: neither arm uploads itself (the frozen baseline would name itself plain "baseline"). After both
+arms, both logs are imported under the pair's names, from the branch name without "experiment/":
+baseline-for-<label>-1gpu-seed-<seed> and <label>-1gpu-seed-<seed>. Upload runs after training, never
+on the clock; a failed upload keeps the local results and prints a retry command.
 """
 import argparse
 from datetime import datetime, timezone
@@ -14,6 +19,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -23,6 +29,27 @@ BASELINE_COMMIT = "5be1ba0ca09293a007997cdce51c036bca3e89ae"
 FULL_UPDATES = 1194
 # Gates on the candidate checkout before any training; "{seed}" becomes the first seed.
 GATES = (("tests/check_rtx5090.py", "--seed", "{seed}"),)
+UPLOADER = "tools/upload_wandb.py"
+LABEL = re.compile(r"[a-z0-9][a-z0-9.-]*")
+
+
+def pair_names(label, seed):
+    """W&B display names: both arms carry the experiment label, so a baseline is never anonymous."""
+    return dict(baseline=f"baseline-for-{label}-1gpu-seed-{seed}", candidate=f"{label}-1gpu-seed-{seed}")
+
+
+def upload(arm, name, env):
+    """Import one finished arm's console log under its pair name; True on success."""
+    command = [env["WANDB_UPLOAD_PYTHON"], UPLOADER, arm["console_log"], "--entity", "i-learn",
+               "--project", "speedrun", "--seed", str(arm["seed"]), "--training-commit", arm["commit"],
+               "--name", name]
+    try:
+        subprocess.run(command, cwd=ROOT, env=env, check=True)
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        print("WARNING: W&B upload failed; local results are safe. Retry: "
+              + " ".join(shlex.quote(part) for part in command), flush=True)
+        return False
 
 
 def git(*args):
@@ -35,7 +62,7 @@ def run_env(seed):
     env.pop("NUM_SCHEDULED_ITERATIONS", None)
     env.update(PORTABLE="1", TRAIN_SEED=str(seed), RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                RTX_VAL_SEQ_LEN="65536", RTX_EVAL_CE_SLAB_ROWS="4096", RTX_WARMUP_MICROBATCHES="2",
-               RTX_MIN_HEADROOM_GIB="1.5", RTX_WANDB_UPLOAD="1")
+               RTX_MIN_HEADROOM_GIB="1.5", RTX_WANDB_UPLOAD="0")  # the runner uploads under pair names
     env.setdefault("WANDB_UPLOAD_PYTHON", str(Path.home() / "venvs/wandb-upload/bin/python"))
     return env
 
@@ -83,12 +110,16 @@ def paired_deltas(baseline, candidate):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seeds", nargs="+", type=int, default=[999])
+    parser.add_argument("--label", help="W&B experiment label; default: branch name without experiment/.")
     args = parser.parse_args()
     if len(set(args.seeds)) != len(args.seeds) or any(seed < 0 for seed in args.seeds):
         parser.error("seeds must be distinct nonnegative integers")
     experiment = git("branch", "--show-current")
     if not experiment or experiment == BASELINE or git("status", "--porcelain"):
         raise RuntimeError("Start on a clean experiment-branch checkout (not baseline, not detached).")
+    label = args.label or experiment.removeprefix("experiment/")
+    if not LABEL.fullmatch(label) or label.startswith("baseline"):
+        raise RuntimeError(f"Invalid W&B label {label!r}: lowercase letters, digits, '.', '-'; not baseline*.")
     if git("rev-parse", BASELINE) != BASELINE_COMMIT:
         raise RuntimeError("Local baseline is not the frozen 5be1ba0 baseline; do not move it silently.")
     candidate_commit = git("rev-parse", "HEAD")
@@ -101,7 +132,8 @@ def main():
     folder = ROOT / "logs" / "pairs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     folder.mkdir(parents=True, exist_ok=False)
     for seed in args.seeds:
-        report = dict(experiment=experiment, seed=seed, status="running", order=["baseline", "candidate"],
+        names = pair_names(label, seed)
+        report = dict(experiment=experiment, label=label, seed=seed, status="running", order=["baseline", "candidate"],
                       settings={k: v for k, v in run_env(seed).items() if k.startswith("RTX_") or k in ("TRAIN_SEED", "PORTABLE")})
         path = folder / f"seed-{seed}.json"
         try:
@@ -113,15 +145,20 @@ def main():
             report.update(status="failed", error=str(exc))
             raise
         finally:
-            path.write_text(json.dumps(report, indent=2) + "\n")
             git("switch", experiment)
+            # Every finished arm is imported under its pair name, also when the other arm failed.
+            for arm in ("baseline", "candidate"):
+                if arm in report:
+                    report[arm].update(wandb_name=names[arm],
+                                       wandb_uploaded=upload(report[arm], names[arm], run_env(seed)))
+            path.write_text(json.dumps(report, indent=2) + "\n")
             print(f"PAIR_RESULT {path}", flush=True)
         base, cand = report["baseline"], report["candidate"]
         print(f"PAIR_COMPLETE seed={seed} baseline_loss={base['final_val_loss']:.6f} "
               f"candidate_loss={cand['final_val_loss']:.6f} loss_delta={report['loss_delta']:+.6f} "
               f"baseline_s={base['training_seconds']:.3f} candidate_s={cand['training_seconds']:.3f} "
-              f"seconds_delta={report['seconds_delta']:+.3f} time_change={report['time_change_percent']:+.3f}%",
-              flush=True)
+              f"seconds_delta={report['seconds_delta']:+.3f} time_change={report['time_change_percent']:+.3f}% "
+              f"wandb={names['baseline']},{names['candidate']}", flush=True)
 
 
 if __name__ == "__main__":

@@ -33,19 +33,28 @@ def fake_git(state):
 
 
 class PairedRunTests(unittest.TestCase):
-    def exercise_pair(self, fail_candidate=False):
+    def exercise_pair(self, fail_candidate=False, fail_upload=False, argv=("--seeds", "999")):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "logs").mkdir()
-            state = {"branch": EXPERIMENT, "runs": [], "checks": []}
+            state = {"branch": EXPERIMENT, "runs": [], "checks": [], "uploads": []}
 
             def run(command, **kwargs):
+                if command[1] == pair.UPLOADER:
+                    # Uploads happen after training, from the candidate checkout's uploader.
+                    self.assertEqual(state["branch"], EXPERIMENT)
+                    state["uploads"].append(command)
+                    if fail_upload:
+                        raise subprocess.CalledProcessError(1, command)
+                    return
                 if command[0] != "bash":
                     self.assertEqual(state["branch"], EXPERIMENT)  # gates run on the candidate
                     state["checks"].append(command[2:])
                     return
                 self.assertEqual(state["checks"], [["tests/check_rtx5090.py", "--seed", "999"]])
                 self.assertNotIn("RTX_ROUTING", kwargs["env"])
+                self.assertEqual(kwargs["env"]["RTX_WANDB_UPLOAD"], "0")  # no self-named baseline upload
+                self.assertEqual(state["uploads"], [])
                 state["runs"].append(state["branch"])
                 if fail_candidate and state["branch"] == EXPERIMENT:
                     raise subprocess.CalledProcessError(1, command)
@@ -55,8 +64,8 @@ class PairedRunTests(unittest.TestCase):
                     f"{3.3 - idx * .01} training_time_ms={830000 - idx * 5000} peak_memory_allocated=19.99 GiB\n")
 
             with patch.object(pair, "ROOT", root), patch.object(pair, "git", fake_git(state)), \
-                    patch.object(pair.subprocess, "run", run), patch.object(sys, "argv", ["pair", "--seeds", "999"]), \
-                    patch.dict(os.environ, RTX_ROUTING="baseline"):
+                    patch.object(pair.subprocess, "run", run), patch.object(sys, "argv", ["pair", *argv]), \
+                    patch.dict(os.environ, RTX_ROUTING="baseline", WANDB_UPLOAD_PYTHON="uploader-python"):
                 if fail_candidate:
                     with self.assertRaises(subprocess.CalledProcessError):
                         pair.main()
@@ -66,7 +75,45 @@ class PairedRunTests(unittest.TestCase):
             self.assertEqual(state["branch"], EXPERIMENT)
             reports = list((root / "logs/pairs").glob("*/seed-999.json"))
             self.assertEqual(len(reports), 1)
+            self.uploads = state["uploads"]
             return json.loads(reports[0].read_text())
+
+    @staticmethod
+    def flag(command, name):
+        return command[command.index(name) + 1]
+
+    def test_both_arms_upload_under_the_experiment_label(self):
+        report = self.exercise_pair()
+        names = [self.flag(c, "--name") for c in self.uploads]
+        self.assertEqual(names, ["baseline-for-some-idea-1gpu-seed-999", "some-idea-1gpu-seed-999"])
+        self.assertEqual([self.flag(c, "--training-commit") for c in self.uploads],
+                         [pair.BASELINE_COMMIT, "candidate-commit"])
+        self.assertEqual([c[2] for c in self.uploads],
+                         [report["baseline"]["console_log"], report["candidate"]["console_log"]])
+        for command in self.uploads:
+            self.assertEqual(command[0], "uploader-python")
+            self.assertEqual((self.flag(command, "--entity"), self.flag(command, "--project"),
+                              self.flag(command, "--seed")), ("i-learn", "speedrun", "999"))
+        self.assertEqual(report["baseline"]["wandb_name"], "baseline-for-some-idea-1gpu-seed-999")
+        self.assertTrue(report["candidate"]["wandb_uploaded"])
+        self.assertEqual(report["label"], "some-idea")
+
+    def test_label_override_and_invalid_labels(self):
+        self.exercise_pair(argv=("--seeds", "999", "--label", "attnres-zero-init"))
+        self.assertEqual([self.flag(c, "--name") for c in self.uploads],
+                         ["baseline-for-attnres-zero-init-1gpu-seed-999", "attnres-zero-init-1gpu-seed-999"])
+        for bad in ("Baseline", "baseline-x", "a b", "x_y", ".x"):
+            with self.subTest(label=bad), patch.object(pair, "git", fake_git({"branch": EXPERIMENT})), \
+                    patch.object(pair.subprocess, "run", side_effect=AssertionError("ran")), \
+                    patch.object(sys, "argv", ["pair", "--label", bad]):
+                with self.assertRaises(RuntimeError):
+                    pair.main()
+
+    def test_upload_failure_keeps_complete_pair(self):
+        report = self.exercise_pair(fail_upload=True)
+        self.assertEqual(report["status"], "complete")
+        self.assertFalse(report["baseline"]["wandb_uploaded"])
+        self.assertFalse(report["candidate"]["wandb_uploaded"])
 
     def test_baseline_then_candidate_with_commits_and_results(self):
         report = self.exercise_pair()
@@ -83,6 +130,8 @@ class PairedRunTests(unittest.TestCase):
         self.assertEqual(report["status"], "failed")
         self.assertIn("baseline", report)
         self.assertNotIn("candidate", report)
+        # The finished baseline is still imported under its pair name.
+        self.assertEqual([self.flag(c, "--name") for c in self.uploads], ["baseline-for-some-idea-1gpu-seed-999"])
 
     def test_refuses_baseline_detached_or_baseline_commit(self):
         for branch, head in (("baseline", "candidate-commit"), ("", "candidate-commit"),
