@@ -46,27 +46,27 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7)
         self.assertIsNone(args)
 
-    def test_experiment_names_are_not_baseline(self):
-        for mode, name in (("static", "static"), ("block_attnres", "block-attnres-b6")):
-            result, args, _ = self.launch(RTX_ROUTING=mode, RTX_ATTNRES_BLOCK_SIZE="6")
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(f"--name\n{name}-1gpu-seed-999\n", args)
-        result, args, _ = self.launch(RTX_ROUTING="block_attnres", RTX_ATTNRES_BLOCK_SIZE="6",
-                                      RTX_ATTNRES_INJECT="0")
+    def test_candidate_is_never_named_baseline(self):
+        for overrides in ({}, {"RTX_ROUTING": "baseline"}, {"RTX_ATTNRES_BLOCK_SIZE": "6"}):
+            with self.subTest(overrides=overrides):
+                result, args, _ = self.launch(**overrides)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("--name\nblock-attnres-last-b6-1gpu-seed-999\n", args)
+        result, args, _ = self.launch(RTX_ATTNRES_BLOCK_SIZE="6", RTX_ATTNRES_INJECT="0")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--name\nblock-attnres-b6-noinject-1gpu-seed-999\n", args)
+        self.assertIn("--name\nblock-attnres-last-b6-noinject-1gpu-seed-999\n", args)
 
-    def test_names_follow_each_baseline_seed(self):
+    def test_names_follow_each_seed(self):
         for seed in (999, 1000, 1001, 1002, 1003):
             with self.subTest(seed=seed):
                 result, args, _ = self.launch(TRAIN_SEED=str(seed))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
+                self.assertIn(f"--name\nblock-attnres-last-b6-1gpu-seed-{seed}\n", args)
 
     def test_missing_seed_is_not_mislabeled(self):
         result, args, _ = self.launch(TRAIN_SEED="")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--name\nbaseline-1gpu-seed-unseeded\n", args)
+        self.assertIn("--name\nblock-attnres-last-b6-1gpu-seed-unseeded\n", args)
         self.assertNotIn("--seed\n", args)
 
     def test_preflight_and_optout_skip_upload(self):

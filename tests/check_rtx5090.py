@@ -3,6 +3,8 @@
 Exercises the existing trainer: all-stage warmup, reset, two complete updates,
 then full validation. Checks are installed only in this test process. This is
 a numerical/memory smoke test, not a convergence or upstream-parity proof.
+On this branch it always checks block AttnRes with the last-source init, including
+gradients and Adam updates of the routing queries and last-source biases.
 """
 import argparse
 import contextlib
@@ -16,6 +18,8 @@ import sys
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
+# Block AttnRes routing parameters that must receive gradients and change on each Adam update.
+ROUTING_PARAMS = ("attnres_queries", "attnres_last_source_bias")
 
 
 class Tee:
@@ -43,8 +47,8 @@ def configure(args):
                       RTX_MICROBATCH_TOKENS="16384", RTX_NGRAM_DIVISOR="32",
                       RTX_VAL_SEQ_LEN=str(args.val_seq_len), RTX_EVAL_CE_SLAB_ROWS="4096",
                       RTX_WARMUP_MICROBATCHES="2", RTX_MIN_HEADROOM_GIB="1.5")
-    os.environ.update(RTX_ROUTING=args.routing, RTX_ATTNRES_BLOCK_SIZE=str(args.block_size),
-                      RTX_ATTNRES_INJECT=str(args.attnres_inject))
+    # This branch always trains block AttnRes with the last-source init (no RTX_ROUTING choice).
+    os.environ.update(RTX_ATTNRES_BLOCK_SIZE=str(args.block_size), RTX_ATTNRES_INJECT=str(args.attnres_inject))
 
 
 def run_check(args):
@@ -107,11 +111,11 @@ def run_check(args):
     original_collect = trainer.GradAccumulator.collect
 
     def checked_collect(accumulator):
-        if args.routing == "block_attnres":
-            required = ("attnres_queries", "attnres_ve_gate") + (("attnres_last_inject",) if args.attnres_inject else ())
-            for param in accumulator.params:
-                if getattr(param, "label", "") in required and param.grad is None:
-                    raise RuntimeError(f"Missing routing gradient: {param.label}")
+        required = (ROUTING_PARAMS + ("attnres_ve_gate",)
+                    + (("attnres_last_inject",) if args.attnres_inject else ()))
+        for param in accumulator.params:
+            if getattr(param, "label", "") in required and param.grad is None:
+                raise RuntimeError(f"Missing routing gradient: {param.label}")
         for i, param in enumerate(accumulator.params):
             finite(f"parameter gradient {i}", param.grad)
         original_collect(accumulator)
@@ -138,8 +142,8 @@ def run_check(args):
 
     def checked_step(instance, step, batches, tables):
         routing_before = None
-        if args.routing == "block_attnres" and state["reset"] and step % 2 == 1:
-            routing_before = instance.uncompiled.attnres_queries.detach().clone()
+        if state["reset"] and step % 2 == 1:
+            routing_before = {name: getattr(instance.uncompiled, name).detach().clone() for name in ROUTING_PARAMS}
         compiled_model = instance.model
         microbatch = 0
 
@@ -171,8 +175,9 @@ def run_check(args):
         if state["reset"]:
             state["updates"] += 1
         if routing_before is not None:
-            if torch.equal(routing_before, instance.uncompiled.attnres_queries.detach()):
-                raise RuntimeError("AttnRes queries did not change on the Adam update")
+            for name, before in routing_before.items():
+                if torch.equal(before, getattr(instance.uncompiled, name).detach()):
+                    raise RuntimeError(f"{name} did not change on the Adam update")
             state["routing_updated"] = True
         print(f"CHECK {'TRAIN' if state['reset'] else 'WARMUP'} step={step} microbatches={microbatch} finite=yes")
         return loss
@@ -191,7 +196,7 @@ def run_check(args):
     trainer.main()
     if state["updates"] != 2 or state["final_loss"] is None or not state["memory"]:
         raise RuntimeError(f"Incomplete verification: {state}")
-    if args.routing == "block_attnres" and not state["routing_updated"]:
+    if not state["routing_updated"]:
         raise RuntimeError("Routing optimizer update was not verified")
     print(f"RTX5090_CHECK status=pass updates=2 final_val_loss={state['final_loss']:.6f}")
 
@@ -199,7 +204,6 @@ def run_check(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=999)
-    parser.add_argument("--routing", choices=("baseline", "static", "block_attnres"), default="baseline")
     parser.add_argument("--block-size", type=int, choices=range(1, 18), default=6)
     parser.add_argument("--attnres-inject", type=int, choices=(0, 1), default=1,
                         help="Block mode: keep the x0/n-gram injections and layer-6 skip (1) or drop them (0).")

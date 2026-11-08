@@ -20,11 +20,9 @@ if [[ "${RTX_WANDB_UPLOAD:-1}" == "1" && "${RTX_PREFLIGHT:-0}" != "1" ]]; then
     upload_args=("$console_log" --entity i-learn --project speedrun)
     [[ -z "${TRAIN_SEED:-}" ]] || upload_args+=(--seed "$TRAIN_SEED")
     [[ -z "$training_commit" ]] || upload_args+=(--training-commit "$training_commit")
-    run_variant="${RTX_ROUTING:-baseline}"
-    if [[ "$run_variant" == "block_attnres" ]]; then
-        run_variant="block-attnres-b${RTX_ATTNRES_BLOCK_SIZE:-6}"
-        [[ "${RTX_ATTNRES_INJECT:-1}" == "1" ]] || run_variant+="-noinject"
-    fi
+    # This branch always trains block AttnRes with the last-source init; never name it baseline.
+    run_variant="block-attnres-last-b${RTX_ATTNRES_BLOCK_SIZE:-6}"
+    [[ "${RTX_ATTNRES_INJECT:-1}" == "1" ]] || run_variant+="-noinject"
     upload_args+=(--name "${run_variant}-1gpu-seed-${TRAIN_SEED:-unseeded}")
     echo "Training finished. Uploading recorded metrics to i-learn/speedrun."
     if ! "$upload_python" tools/upload_wandb.py "${upload_args[@]}"; then

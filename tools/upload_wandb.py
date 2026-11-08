@@ -43,13 +43,15 @@ def parse_log(text):
     if routing:
         if len(routing) != 1:
             raise ValueError("Expected one routing configuration.")
-        match = re.fullmatch(r"ROUTING variant=(baseline|static|block_attnres) block_size=(\d+)(?: inject=([01]))?",
-                             routing[0])
+        match = re.fullmatch(r"ROUTING variant=(baseline|static|block_attnres) block_size=(\d+)"
+                             r"(?: inject=([01]))?(?: last_init=(0?\.\d+))?", routing[0])
         if not match or not 1 <= int(match[2]) <= 17:
             raise ValueError("Invalid routing configuration.")
         config.update(routing_variant=match[1], attnres_block_size=int(match[2]))
         if match[3] is not None:  # Logs before the injection switch dropped the injections.
             config["attnres_inject"] = match[3] == "1"
+        if match[4] is not None:  # Initial depth weight of each site's newest source (attnres-last-init).
+            config["attnres_last_init"] = float(match[4])
     history, finals = {}, []
     summary = {"canonical_mask_fallback": False}
     previous = -1

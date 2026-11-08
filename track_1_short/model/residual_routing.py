@@ -7,8 +7,24 @@ No token mixing, detached history, or persistent state across forwards.
 A completed block is stored as (value, inv_rms): its per-token 1/RMS is computed once, when the
 block closes, and reused by every later site. The key's RMSNorm weight is folded into the query
 (the logit only ever sees their elementwise product), so each site learns one query vector.
+
+Last-source init (experiment/attnres-last-init): each site also learns one scalar bias on its newest
+source (the open block, else the newest completed block). With n sources the newest logit gains
+bias + log(n - 1), so at zero query the newest source gets weight sigmoid(bias) and the other n - 1
+share the rest equally, whatever n is. The bias starts at logit(LAST_SOURCE_INIT_WEIGHT). The paper's
+uniform start (weight 1/n) is bias = -log(n - 1); the zero queries are unchanged.
 """
+import math
+
 import torch
+
+# Initial depth-softmax weight of each site's newest source (zero query); the others share the rest.
+LAST_SOURCE_INIT_WEIGHT = 0.9
+
+
+def last_bias_init(weight=LAST_SOURCE_INIT_WEIGHT):
+    """The last-source bias at which the newest source starts with `weight` of the depth softmax."""
+    return math.log(weight / (1 - weight))
 
 
 def inv_rms(source, eps=1e-6):
@@ -21,11 +37,14 @@ def source(value):
     return value, inv_rms(value)
 
 
-def block_mix(blocks, partial, query):
+def block_mix(blocks, partial, query, last_bias=None):
     sources = blocks if partial is None else (*blocks, source(partial))
     # logit = <value / rms(value), query>, as one fp32 dot per source and token.
-    logits = torch.stack([(value.float() @ query) * scale for value, scale in sources], dim=0)
-    weights = logits.softmax(dim=0)
+    logits = [(value.float() @ query) * scale for value, scale in sources]
+    if last_bias is not None and len(sources) > 1:
+        # A single source always has weight 1, so its site's bias is unused there.
+        logits[-1] = logits[-1] + (last_bias.float() + math.log(len(sources) - 1))
+    weights = torch.stack(logits, dim=0).softmax(dim=0)
     result = sources[0][0] * weights[0].to(sources[0][0].dtype).unsqueeze(-1)
     for j in range(1, len(sources)):
         value = sources[j][0]
@@ -57,9 +76,3 @@ def stream_total(blocks, partial):
     for value, _ in blocks[1:]:
         total = total + value
     return total if partial is None else total + partial
-
-
-def static_mudd(bias, scale, x, num_coef):
-    """Broadcast learned coefficients; input values do not determine the routing."""
-    return (bias[:num_coef] * scale).to(x.dtype).view(1, 1, num_coef).expand(
-        *x.shape[:-1], num_coef)

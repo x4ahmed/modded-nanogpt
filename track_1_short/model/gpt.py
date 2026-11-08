@@ -9,7 +9,7 @@ from torch import Tensor, nn
 from track_1_short.model.attention import AttnArgs, CausalSelfAttention, Yarn
 from track_1_short.model.layers import CastedLinearT, next_multiple_of_n, norm
 from track_1_short.model.residual_routing import (
-    add_to_partial, append_output, block_mix, source, static_mudd, stream_total,
+    add_to_partial, append_output, block_mix, last_bias_init, source, stream_total,
 )
 from track_1_short.ngram_table import NGRAM_SIGN_POOL_ROWS
 from track_1_short.perf.kernels.cross_entropy import (
@@ -201,16 +201,17 @@ class GPT(nn.Module):
         self.attnres_inject = portable_config.ATTNRES_INJECT
         if self.routing == "block_attnres":
             # 7 attention + 10 serial MLP sites, plus one final readout.
-            # Zero queries start as uniform depth mixing; no additional RNG draws.
+            # Zero queries, as in the paper; no additional RNG draws.
             self.attnres_queries = nn.Parameter(torch.zeros(18, model_dim, device=device))
+            # This branch's only change to block AttnRes: one learned bias per site on its newest
+            # source, so every depth softmax starts with LAST_SOURCE_INIT_WEIGHT (0.9) there
+            # instead of uniform weights (model/residual_routing.py).
+            self.attnres_last_source_bias = nn.Parameter(torch.full((18,), last_bias_init(), device=device))
             # Last layer's value-embedding gate, replacing MUDD's per-token mu[6], mu[7]: 2 + linear,
             # zero-initialized, so it starts at MUDD's initial factor 2 and stays learnable per head.
             self.attnres_ve_gate = nn.Parameter(torch.zeros(num_heads, 2 * VALUE_EMBED_GATE_CHANNELS, device=device))
             # Last layer's x0 (cache[0]) / n-gram injection lambdas, MUDD's mu[10], mu[11] at init.
             self.attnres_last_inject = nn.Parameter(torch.tensor([0.0, 0.05], device=device))
-        if self.routing == "static":
-            # Learned constant per-channel-group deltas for the post-loop mix (dynamic init: zero).
-            self.mudd_static_deltas = nn.Parameter(torch.zeros(LAST_LAYER_MUDD_COEFS, MUDD_GROUPS, device=device))
 
         # Auto-label parameters
         for name, param in self.named_parameters():
@@ -437,18 +438,12 @@ class GPT(nn.Module):
 
     def forward_mudd(self, x, id, num_coef):
         """Returns `num_coef` per-token MUDD coefficients from block `id` (0 or 1)."""
-        if self.routing == "static":
-            return static_mudd(self.mudd_b2[id], self._mudd_scale, x, num_coef).split(1, dim=-1)
         x = F.gelu(F.linear(x, self.mudd_w1[id]))
         x = (F.linear(x, self.mudd_w2[id, :num_coef]) + self.mudd_b2[id, :num_coef]) * self._mudd_scale
         return x.split(1, dim=-1)
 
     def forward_mudd_grouped(self, x, id, num_coef):
         """forward_mudd's coefficients plus (B, T, num_coef, MUDD_GROUPS) per-channel-group deltas."""
-        if self.routing == "static":
-            y = static_mudd(self.mudd_b2[id], self._mudd_scale, x, num_coef)
-            deltas = (self.mudd_static_deltas[:num_coef] * self._mudd_scale).to(x.dtype).view(1, 1, num_coef, MUDD_GROUPS)
-            return y.split(1, dim=-1), deltas
         h = F.gelu(F.linear(x, self.mudd_w1[id]))
         y = (F.linear(h, self.mudd_w2[id, :num_coef]) + self.mudd_b2[id, :num_coef]) * self._mudd_scale
         deltas = torch.einsum("btd,kgd->btkg", h, self.mudd_w2g[:num_coef]) * self._mudd_scale
@@ -831,22 +826,24 @@ class GPT(nn.Module):
         output (the skip re-adds the summed stream after layer 3, the baseline's cache[3]); without
         it they are dropped too. Retained: initial n-gram injection, value embeddings and their gates,
         head/XSA gates, output gains, FP8 projections, windows, layer topology, layer 8's parallel MLP.
+        Each of the 18 depth mixes adds its site's attnres_last_source_bias to its newest source.
         """
         blocks, partial, site = (source(x),), None, 0
         queries = self.attnres_queries.unbind(0)
+        last_biases = self.attnres_last_source_bias.unbind(0)
         skip_gate = skip_from = None
         for i in range(self.num_layers):
             # The depth mix for `site`, reused until a sublayer or an injection changes the sources.
             mixed = None
             if i == POST_GATE_LAYER:
-                mixed = block_mix(blocks, partial, queries[site])
+                mixed = block_mix(blocks, partial, queries[site], last_biases[site])
                 gate = self.forward_mudd_gate(mixed, id=1, num_coef=self._mudd_gate_post_num_coef)
                 skip_gate = self.unpack_post_mudd_gate(gate, attn_gates, x0_gates, bigram_gates)
             if self.attnres_inject and i == 6:
                 partial = add_to_partial(partial, torch.sigmoid(skip_lambda) * skip_gate * skip_from)
                 mixed = None
             if i in ATTN_LAYERS:
-                h = norm(block_mix(blocks, partial, queries[site]))
+                h = norm(block_mix(blocks, partial, queries[site], last_biases[site]))
                 B, T, _ = h.shape
                 qkv_fp8 = None
                 if self.training:
@@ -886,7 +883,7 @@ class GPT(nn.Module):
                     partial = add_to_partial(partial, injection)
                     mixed = None
             if i not in NO_MLP_LAYERS:
-                h = norm(mixed if mixed is not None else block_mix(blocks, partial, queries[site]))
+                h = norm(mixed if mixed is not None else block_mix(blocks, partial, queries[site], last_biases[site]))
                 # Last layer has no folded scale in the baseline cache: apply its gain explicitly.
                 fold = post_mlp[i] if self.training and i != self.num_layers - 1 else None
                 x_f8 = quantize_dual_layout_fused(h.detach().view(-1, h.size(-1)), self._mlp_x_scale,
@@ -903,7 +900,7 @@ class GPT(nn.Module):
             if self.attnres_inject and i == 3:
                 skip_from = stream_total(blocks, partial)
         assert site == 17
-        return block_mix(blocks, partial, queries[site])
+        return block_mix(blocks, partial, queries[site], last_biases[site])
 
     def _attnres_injection(self, i, x0, x0_bigram, x0_gates, bigram_gates):
         """Layer i's gated x0 and n-gram injections as one full-width term (_inject's, without x)."""

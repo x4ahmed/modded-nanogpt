@@ -32,8 +32,13 @@ class UploadTests(unittest.TestCase):
         for flag, expected in (("1", True), ("0", False)):
             text = LOG.replace(HEADER, HEADER + f"\nROUTING variant=block_attnres block_size=6 inject={flag}")
             self.assertIs(module.parse_log(text)["config"]["attnres_inject"], expected)
-        with self.assertRaises(ValueError):
-            module.parse_log(LOG.replace(HEADER, HEADER + "\nROUTING variant=unknown block_size=0"))
+            self.assertNotIn("attnres_last_init", module.parse_log(text)["config"])
+        text = LOG.replace(HEADER, HEADER + "\nROUTING variant=block_attnres block_size=6 inject=1 last_init=0.9")
+        config = module.parse_log(text)["config"]
+        self.assertEqual((config["attnres_inject"], config["attnres_last_init"]), (True, 0.9))
+        for bad in ("variant=unknown block_size=0", "variant=block_attnres block_size=6 inject=1 last_init=2"):
+            with self.assertRaises(ValueError):
+                module.parse_log(LOG.replace(HEADER, HEADER + f"\nROUTING {bad}"))
 
     def test_merge_same_step_and_preserve_timing(self):
         result = module.parse_log(LOG)

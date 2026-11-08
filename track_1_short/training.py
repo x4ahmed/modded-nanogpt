@@ -118,14 +118,11 @@ class TrainingManager():
             self.param_table["attnres_ve_gate"] = dict(self.param_table["ve_gate_bank"])
             # Stands in for mu[10], mu[11]: the MUDD bias settings.
             self.param_table["attnres_last_inject"] = dict(self.param_table["mudd_b2"])
-            for label in ("attnres_queries", "attnres_ve_gate", "attnres_last_inject"):
+            # A routing bias like mudd_b2 (no weight decay, so nothing pulls it back to uniform).
+            self.param_table["attnres_last_source_bias"] = dict(self.param_table["mudd_b2"])
+            for label in ("attnres_queries", "attnres_ve_gate", "attnres_last_inject", "attnres_last_source_bias"):
                 self.scatter_order.append(label)
                 self.work_order.append(label)
-        if model.routing == "static":
-            # The grouped deltas mudd_w2g produced, now constants: same optimizer settings.
-            self.param_table["mudd_static_deltas"] = dict(self.param_table["mudd_w2g"])
-            self.scatter_order.append("mudd_static_deltas")
-            self.work_order.append("mudd_static_deltas")
 
         anvil_defaults = dict(
             lr=0.023,

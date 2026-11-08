@@ -1,14 +1,25 @@
-"""CPU mathematical/gradient checks; GPU integration is check_rtx5090 --routing."""
+"""CPU mathematical/gradient checks; GPU integration is tests/check_rtx5090.py."""
 import ast
+import importlib.util
+import math
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 from torch import nn
 from track_1_short.model.residual_routing import (
-    add_to_partial, append_output, block_mix, source, static_mudd, stream_total,
+    LAST_SOURCE_INIT_WEIGHT, add_to_partial, append_output, block_mix, last_bias_init, source, stream_total,
 )
+
+
+def depth_weights(num_sources, query, last_bias):
+    """The depth weights block_mix applies: each source is a one-hot value, so output channel j = weight j."""
+    values = [torch.eye(8)[j].view(1, 1, 8) for j in range(num_sources)]
+    out = block_mix(tuple(source(v) for v in values[:-1]), values[-1], query, last_bias)
+    return out.view(8)[:num_sources]
 
 
 class RoutingTests(unittest.TestCase):
@@ -16,6 +27,43 @@ class RoutingTests(unittest.TestCase):
         a, b = torch.randn(2, 5, 8), torch.randn(2, 5, 8) * 10
         actual = block_mix((source(a),), b, torch.zeros(8))
         torch.testing.assert_close(actual, (a + b) / 2)
+
+    def test_last_bias_starts_newest_source_at_init_weight_for_any_count(self):
+        self.assertEqual(LAST_SOURCE_INIT_WEIGHT, 0.9)
+        bias = torch.tensor(last_bias_init())
+        for n in (2, 3, 4, 5):
+            with self.subTest(sources=n):
+                weights = depth_weights(n, torch.zeros(8), bias)
+                expected = torch.full((n,), (1 - LAST_SOURCE_INIT_WEIGHT) / (n - 1))
+                expected[-1] = LAST_SOURCE_INIT_WEIGHT
+                torch.testing.assert_close(weights, expected)
+
+    def test_last_bias_uniform_point_and_single_source(self):
+        for n in (2, 4):
+            weights = depth_weights(n, torch.zeros(8), torch.tensor(-math.log(n - 1)))
+            torch.testing.assert_close(weights, torch.full((n,), 1 / n))
+        a = torch.randn(1, 3, 8)
+        torch.testing.assert_close(block_mix((source(a),), None, torch.randn(8), torch.tensor(5.0)), a)
+
+    def test_last_bias_reference_outputs_and_gradients(self):
+        torch.manual_seed(11)
+        sources = [torch.randn(2, 3, 8, requires_grad=True) for _ in range(4)]
+        q = torch.randn(8, requires_grad=True)
+        bias = torch.tensor(0.7, requires_grad=True)
+        actual = block_mix(tuple(source(s) for s in sources[:-1]), sources[-1], q, bias)
+        values = torch.stack(sources)
+        keys = values * torch.rsqrt(values.square().mean(-1, keepdim=True) + 1e-6)
+        logits = (keys * q).sum(-1)
+        shift = torch.zeros(4)
+        shift[-1] = math.log(3)
+        logits = logits + (shift + torch.nn.functional.one_hot(torch.tensor(3), 4) * bias).view(4, 1, 1)
+        expected = (values * logits.softmax(0).unsqueeze(-1)).sum(0)
+        torch.testing.assert_close(actual, expected)
+        ga = torch.autograd.grad(actual.square().sum(), [*sources, q, bias], retain_graph=True)
+        gb = torch.autograd.grad(expected.square().sum(), [*sources, q, bias])
+        for a, b in zip(ga, gb):
+            torch.testing.assert_close(a, b)
+        self.assertGreater(ga[-1].abs().item(), 0)
 
     def test_reference_outputs_and_gradients(self):
         torch.manual_seed(7)
@@ -62,24 +110,47 @@ class RoutingTests(unittest.TestCase):
         actual = block_mix((source(a),), b, q)
         torch.testing.assert_close(actual[:, :2], expected[:, :2])
 
-    def test_static_input_independent_and_trainable(self):
-        bias = nn.Parameter(torch.arange(5, dtype=torch.float32))
-        a = static_mudd(bias, 0.1, torch.randn(1, 4, 8), 5)
-        b = static_mudd(bias, 0.1, torch.randn(1, 4, 8) * 20, 5)
-        torch.testing.assert_close(a, b)
-        a.sum().backward()
-        torch.testing.assert_close(bias.grad, torch.full((5,), 0.4))
-
     def test_bf16_and_compiled_backward(self):
         a = torch.randn(1, 3, 8, dtype=torch.bfloat16, requires_grad=True)
         b = torch.randn_like(a, requires_grad=True)
         q = nn.Parameter(torch.zeros(8))
-        compiled = torch.compile(lambda a, b, q: block_mix((source(a),), b, q), backend="aot_eager", fullgraph=True)
-        actual = compiled(a, b, q)
+        c = nn.Parameter(torch.tensor(last_bias_init()))
+        compiled = torch.compile(lambda a, b, q, c: block_mix((source(a),), b, q, c), backend="aot_eager", fullgraph=True)
+        actual = compiled(a, b, q, c)
         self.assertEqual(actual.dtype, torch.bfloat16)
+        torch.testing.assert_close(actual, block_mix((source(a),), b, q, c))
         actual.float().square().sum().backward()
-        for t in (a, b, q):
+        for t in (a, b, q, c):
             self.assertTrue(torch.isfinite(t.grad).all())
+        self.assertGreater(c.grad.abs().item(), 0)
+
+    def test_config_always_selects_the_candidate_under_portable(self):
+        path = Path(__file__).resolve().parents[1] / "track_1_short/portable/config.py"
+
+        def load(**env):
+            spec = importlib.util.spec_from_file_location("branch_config", path)
+            module = importlib.util.module_from_spec(spec)
+            with patch.dict(os.environ, env, clear=True):
+                spec.loader.exec_module(module)
+            return module
+
+        self.assertEqual(load(PORTABLE="1").ROUTING, "block_attnres")
+        self.assertEqual(load(PORTABLE="1", RTX_ROUTING="block_attnres").ROUTING, "block_attnres")
+        self.assertEqual(load().ROUTING, "baseline")  # the record's 8-GPU path is untouched
+        for routing in ("baseline", "static"):
+            with self.assertRaises(ValueError):
+                load(PORTABLE="1", RTX_ROUTING=routing)
+
+    def test_model_creates_last_source_bias_at_init_weight(self):
+        path = Path(__file__).resolve().parents[1] / "track_1_short/model/gpt.py"
+        tree = ast.parse(path.read_text())
+        klass = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "GPT")
+        init = next(n for n in klass.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        assigns = [ast.unparse(n) for n in ast.walk(init) if isinstance(n, ast.Assign)
+                   and "self.attnres_last_source_bias" in ast.unparse(n.targets[0])]
+        self.assertEqual(assigns, ["self.attnres_last_source_bias = nn.Parameter("
+                                   "torch.full((18,), last_bias_init(), device=device))"])
+        self.assertAlmostEqual(1 / (1 + math.exp(-last_bias_init())), LAST_SOURCE_INIT_WEIGHT)
 
     def _attnres_method(self):
         """The real _forward_attnres / _attnres_injection, with CPU stubs for the CUDA operators."""
@@ -115,6 +186,7 @@ class RoutingTests(unittest.TestCase):
         fake = SimpleNamespace(num_layers=11, num_heads=2, head_dim=4, ngram_dim=3, training=False,
                                attnres_block_size=6, attnres_inject=inject,
                                attnres_queries=nn.Parameter(torch.zeros(18, 8)),
+                               attnres_last_source_bias=nn.Parameter(torch.full((18,), last_bias_init())),
                                attnres_ve_gate=nn.Parameter(torch.zeros(2, 12)),
                                attnres_last_inject=nn.Parameter(torch.tensor([0.0, 0.05])),
                                _mudd_gate_post_num_coef=13,
@@ -150,14 +222,24 @@ class RoutingTests(unittest.TestCase):
                 namespace, mixes = self._attnres_method()
                 seen = []
                 fake = self._attnres_fake(namespace, inject, seen)
+                fake.attnres_last_source_bias = nn.Parameter(torch.arange(18.) / 100 + last_bias_init())
                 inputs, gates, ve = self._attnres_inputs()
                 output = self._run_attnres(namespace, fake, inputs, gates, ve)
                 self.assertEqual(len(seen), 7)
                 self.assertEqual(output.shape, inputs["x"].shape)
                 # 17 sites + the readout; layer 4's gate mix is reused unless an injection changed it.
                 self.assertEqual(len(mixes), 19 if inject else 18)
+                # Every depth mix uses its own site's last-source bias (sites tagged by bias value).
+                sites = [round((float(bias.detach()) - last_bias_init()) * 100) for *_, bias in mixes]
+                self.assertEqual(sites, sorted(sites))
+                self.assertEqual(set(sites), set(range(18)))
+                self.assertEqual(sites[-1], 17)  # the readout
                 output.square().sum().backward()
                 self.assertGreater(fake.attnres_queries.grad.abs().sum().item(), 0)
+                bias_grad = fake.attnres_last_source_bias.grad
+                self.assertEqual(bias_grad[0].item(), 0)  # site 0 (layer-0 attention) has one source
+                self.assertGreater(bias_grad[1:].abs().sum().item(), 0)
+                self.assertTrue(torch.isfinite(bias_grad).all())
                 self.assertGreater(fake.attnres_ve_gate.grad.abs().sum().item(), 0)
                 self.assertTrue(torch.isfinite(inputs["x"].grad).all())
                 last = fake.attnres_last_inject.grad
@@ -204,33 +286,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(folds), 11)
         self.assertGreater(fake.attnres_queries.grad.abs().sum().item(), 0)
 
-    def test_static_methods_match_initial_dynamic_mudd(self):
-        path = Path(__file__).resolve().parents[1] / "track_1_short/model/gpt.py"
-        tree = ast.parse(path.read_text())
-        klass = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "GPT")
-        ns = dict(torch=torch, F=torch.nn.functional, static_mudd=static_mudd, MUDD_GROUPS=12)
-        for node in klass.body:
-            if isinstance(node, ast.FunctionDef) and node.name in ("forward_mudd", "forward_mudd_grouped"):
-                exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), ns)
-        fake = SimpleNamespace(routing="baseline", mudd_w1=torch.randn(2, 4, 8),
-                               mudd_w2=torch.zeros(2, 14, 4), mudd_b2=nn.Parameter(torch.randn(2, 14)),
-                               mudd_w2g=nn.Parameter(torch.zeros(14, 12, 4)), _mudd_scale=0.1,
-                               mudd_static_deltas=nn.Parameter(torch.zeros(14, 12)))
-        x = torch.randn(1, 3, 8)
-        original = ns["forward_mudd"](fake, x, 0, 14)
-        original_group, original_delta = ns["forward_mudd_grouped"](fake, x, 1, 10)
-        fake.routing = "static"
-        actual = ns["forward_mudd"](fake, x * 3, 0, 14)
-        actual_group, actual_delta = ns["forward_mudd_grouped"](fake, x * 3, 1, 10)
-        for a, b in zip(actual + actual_group, original + original_group):
-            torch.testing.assert_close(a, b)
-        torch.testing.assert_close(actual_delta.expand_as(original_delta), original_delta)
-        (sum(t.sum() for t in actual + actual_group) + actual_delta.sum()).backward()
-        self.assertGreater(fake.mudd_b2.grad.abs().sum().item(), 0)
-        self.assertGreater(fake.mudd_static_deltas.grad[:10].abs().sum().item(), 0)
-        self.assertIsNone(fake.mudd_w2g.grad)  # static mode no longer borrows a slice of it
-
-    def test_optimizer_registers_both_parameters(self):
+    def test_optimizer_registers_routing_parameters(self):
         path = Path(__file__).resolve().parents[1] / "track_1_short/training.py"
         tree = ast.parse(path.read_text())
         klass = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TrainingManager")
@@ -243,15 +299,14 @@ class RoutingTests(unittest.TestCase):
         fake = SimpleNamespace(param_table=dict(table), scatter_order=[], work_order=[])
         exec(compile(ast.Module(body=registration, type_ignores=[]), str(path), "exec"),
              dict(self=fake, model=SimpleNamespace(routing="block_attnres")))
-        self.assertNotIn("mudd_static_deltas", fake.param_table)
         self.assertEqual(fake.param_table["attnres_ve_gate"], table["ve_gate_bank"])
         self.assertEqual(fake.param_table["attnres_last_inject"], table["mudd_b2"])
-        static = SimpleNamespace(param_table=dict(table), scatter_order=[], work_order=[])
+        self.assertEqual(fake.param_table["attnres_last_source_bias"], table["mudd_b2"])
+        baseline = SimpleNamespace(param_table=dict(table), scatter_order=[], work_order=[])
         exec(compile(ast.Module(body=registration, type_ignores=[]), str(path), "exec"),
-             dict(self=static, model=SimpleNamespace(routing="static")))
-        self.assertEqual(static.scatter_order, ["mudd_static_deltas"])
-        self.assertEqual(static.param_table["mudd_static_deltas"], table["mudd_w2g"])
-        for label in ("attnres_queries", "attnres_ve_gate", "attnres_last_inject"):
+             dict(self=baseline, model=SimpleNamespace(routing="baseline")))
+        self.assertEqual((baseline.param_table, baseline.scatter_order), (table, []))
+        for label in ("attnres_queries", "attnres_ve_gate", "attnres_last_inject", "attnres_last_source_bias"):
             self.assertIn(label, fake.scatter_order)
             self.assertIn(label, fake.work_order)
             self.assertEqual(fake.param_table[label]["optim"], "adam")

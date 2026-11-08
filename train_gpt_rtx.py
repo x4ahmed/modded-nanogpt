@@ -47,6 +47,7 @@ from track_1_short.data import cu_seqlens_rows
 from track_1_short.distributed import setup_distributed
 from track_1_short.model.gpt import GPT
 from track_1_short.model.prefix_prediction import build_prefix_table_bucket
+from track_1_short.model.residual_routing import LAST_SOURCE_INIT_WEIGHT
 from track_1_short.ngram_table import NGRAM_DIM, NGRAM_VOCAB_SIZE, is_update_step
 from track_1_short.optim.anvil import anvil_bank_update
 from track_1_short.perf.kernels.mlp import mlp_block_n, prime_stage_cache
@@ -152,7 +153,8 @@ def main():
            f"record's), validation {val_seq}-token forwards, MLP tile 128x{mlp_block_n()}, eval CE slab "
            f"{rtx.EVAL_CE_SLAB_ROWS} rows, steps {total_steps}/{schedule.total_steps}"
            f"{' (PREFLIGHT)' if PREFLIGHT else ''}", console=True)
-    print0(f"ROUTING variant={rtx.ROUTING} block_size={rtx.ATTNRES_BLOCK_SIZE} inject={int(rtx.ATTNRES_INJECT)}", console=True)
+    print0(f"ROUTING variant={rtx.ROUTING} block_size={rtx.ATTNRES_BLOCK_SIZE} inject={int(rtx.ATTNRES_INJECT)} "
+           f"last_init={LAST_SOURCE_INIT_WEIGHT:g}", console=True)
     flush_log()
 
     ########################################
