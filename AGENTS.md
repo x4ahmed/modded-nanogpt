@@ -37,7 +37,8 @@
 - Bias optimizer: replicated Adam with mudd_b2 settings (LR x0.25, betas 0.9/0.99, no WD). Created by
   torch.full (no RNG draws); warmup reset restores it; not tail-averaged. Site 0 (one source) ignores it.
 - Log line: ROUTING variant=block_attnres block_size=6 inject=1 last_init=0.9; uploader records it.
-- Status 2026-11-08: implemented; 45 CPU tests pass. GPU smoke and the seed-999 pair NOT run yet.
+- Status 2026-11-08: implemented; 48 CPU tests pass. GPU smoke and the seed-999 pair NOT run yet.
+  Target to beat: its own paired baseline by > 0.002; zero init lost by 0.0369 in its pair.
 
 ## Commands
 - Pair: python -u tools/run_pair.py --seeds 999 (clean checkout of this branch; full command block in
@@ -46,7 +47,9 @@
   Arms train with RTX_WANDB_UPLOAD=0; the runner then uploads both as baseline-for-<label>-1gpu-seed-N
   and <label>-1gpu-seed-N (label = branch minus experiment/, or --label), outside the timers.
 - tools/run_pair.py is generic (candidate = current branch): copy it unchanged to later Phase 2 branches.
-- Zero-init reference pair (Experiment 1 rerun), given to the user 2026-11-08, result pending: on
+- Zero-init reference pair DONE 2026-11-08 (seed 999): baseline 3.295493 / 862.153 s, zero-init
+  AttnRes 3.332404 / 952.489 s: +0.036911 loss, +10.48% time; reproduces Exp 1. Details in
+  docs/attnres-last-init.md. W&B names depend on which command block the user ran (unverified). Was: on
   experiment/attention-residuals, smoke check, baseline, then RTX_ROUTING=block_attnres
   RTX_ATTNRES_BLOCK_SIZE=6 RTX_ATTNRES_INJECT=1 bash run_rtx.sh; uploads off, then explicit uploads as
   baseline-for-attnres-zero-init-1gpu-seed-999 / attnres-zero-init-1gpu-seed-999.
