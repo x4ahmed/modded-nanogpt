@@ -39,6 +39,7 @@
 - Log line: ROUTING variant=block_attnres block_size=6 inject=1 last_init=0.9; uploader records it.
 - Status 2026-11-08: implemented; 48 CPU tests pass. GPU smoke and the seed-999 pair NOT run yet.
   Target to beat: its own paired baseline by > 0.002; zero init lost by 0.0369 in its pair.
+  First pair attempt (2026-11-08) died with a frozen SSH terminal; rerun inside tmux on the login node.
 
 ## Commands
 - Pair: python -u tools/run_pair.py --seeds 999 (clean checkout of this branch; full command block in
