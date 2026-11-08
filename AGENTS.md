@@ -49,7 +49,7 @@
 - tools/run_pair.py is generic (candidate = current branch): copy it unchanged to later Phase 2 branches.
 - Zero-init reference pair DONE 2026-11-08 (seed 999): baseline 3.295493 / 862.153 s, zero-init
   AttnRes 3.332404 / 952.489 s: +0.036911 loss, +10.48% time; reproduces Exp 1. Details in
-  docs/attnres-last-init.md. W&B names depend on which command block the user ran (unverified). Was: on
+  docs/attnres-last-init.md. Uploaded under old names; user renamed both in W&B to the pair names. Was: on
   experiment/attention-residuals, smoke check, baseline, then RTX_ROUTING=block_attnres
   RTX_ATTNRES_BLOCK_SIZE=6 RTX_ATTNRES_INJECT=1 bash run_rtx.sh; uploads off, then explicit uploads as
   baseline-for-attnres-zero-init-1gpu-seed-999 / attnres-zero-init-1gpu-seed-999.
