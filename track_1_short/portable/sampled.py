@@ -10,12 +10,16 @@ read them -- the record's race contract, kept by construction.
 The negatives come from one stride sweep that advances with every build (the record staggers one
 sweep per rank instead): consecutive microbatches get disjoint negative windows, and across a run every
 class is visited uniformly, which is what the staggering is for.
+
+experiment/vocab-prune: the record's full-softmax steps run here at width PRUNED_WIDTH over the ids
+seen as training targets so far (portable/vocab_prune.py); every microbatch marks its targets as seen.
 """
 import numpy as np
 import torch
 from torch import Tensor
 
 from track_1_short.perf.kernels.transpose import transpose_copy
+from track_1_short.portable.vocab_prune import PRUNED_WIDTH, SeenTargets, pruned_counts
 from track_1_short.sampled_softmax import CandidateBuilder, SampledLoss, _stage_index, candidate_count_at
 from track_1_short.schedule import TrainingSchedule
 
@@ -24,7 +28,10 @@ class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
                  device: torch.device):
         self.schedule = schedule
-        self.counts = [candidate_count_at(schedule, s) for s in range(schedule.total_steps + 1)]
+        record_counts = [candidate_count_at(schedule, s) for s in range(schedule.total_steps + 1)]
+        # The record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
+        self.pruned_steps = frozenset(s for s, count in enumerate(record_counts) if not count)
+        self.counts = pruned_counts(record_counts)
         p_values = sorted(set(self.counts) - {0})
         assert p_values
         max_p = max(p_values)
@@ -42,10 +49,15 @@ class PortableSampledSoftmax:
                            target_pos=target_pos, prefix_pos=prefix_pos, vocab_pos=vocab_pos)
             for p in p_values
         }
+        self.seen = SeenTargets(vocab_size, PRUNED_WIDTH, device)
         self.reset()
 
     def reset(self):
         self.builder.reset(rank=0, world_size=1)
+        self.seen.reset()
+        # (step, set version) whose rows the pruned slab holds; None after a sampled build overwrote the
+        # shared candidates / vocab_pos / prefix_pos buffers (warmup interleaves the two kinds of step).
+        self.pruned_loaded: tuple[int, int] | None = None
 
     def set_prefix_table(self, prefix_table: np.ndarray):
         self.prefix_table = prefix_table
@@ -58,12 +70,18 @@ class PortableSampledSoftmax:
         return {(self.counts[s], _stage_index(self.schedule, s)) for s in steps}
 
     @torch.no_grad()
-    def prepare(self, step: int, targets_cpu: Tensor, lm_head_f8_col: Tensor) -> SampledLoss | None:
+    def prepare(self, step: int, targets_cpu: Tensor, lm_head_f8_col: Tensor,
+                targets: Tensor | None = None) -> SampledLoss | None:
         """This microbatch's candidate set, uploaded, with its lm_head rows gathered from the current fp8
-        cache; None on full-softmax steps. Call after the step's fp8 refresh, right before the forward."""
+        cache; None if a pruned step falls back to the full softmax. Call after the step's fp8 refresh,
+        right before the forward. `targets` is the device copy of targets_cpu (copied here if omitted)."""
+        if targets is None:
+            targets = targets_cpu.to(self.candidates.device)
+        self.seen.mark(targets)
+        if step in self.pruned_steps:
+            return self._prepare_pruned(step, targets_cpu, targets, lm_head_f8_col)
+        self.pruned_loaded = None
         P = self.counts[step]
-        if not P:
-            return None
         inputs = self.loss_inputs[P]
         candidates, target_pos, prefix_pos = self.builder.build(P, targets_cpu.numpy(), self.prefix_table)
         # Pageable H2D copies return once the host source is read, so the builder may reuse its scratch.
@@ -76,4 +94,27 @@ class PortableSampledSoftmax:
         transpose_copy(inputs.rows.view(torch.uint8), inputs.rows_t.view(torch.uint8))
         inputs.vocab_pos.fill_(-1)
         inputs.vocab_pos.index_copy_(0, cand, self.arange[:P])
+        return inputs
+
+    def _prepare_pruned(self, step: int, targets_cpu: Tensor, targets: Tensor, lm_head_f8_col: Tensor):
+        """C = every id seen as a target so far, filled to PRUNED_WIDTH; target positions looked up on the
+        device. The set, its maps and the row slab are rebuilt only when needed (see reset)."""
+        P = PRUNED_WIDTH
+        inputs = self.loss_inputs[P]
+        state = self.seen.refresh(targets_cpu.numpy())
+        if state == "full":
+            return None
+        if state == "new" or self.pruned_loaded is None:
+            self.candidates[:P].copy_(torch.from_numpy(self.seen.candidates))
+            inputs.vocab_pos.fill_(-1)
+            inputs.vocab_pos.index_copy_(0, self.candidates[:P], self.arange[:P])
+            inputs.prefix_pos.fill_(-1)  # the prefix weight is 0 in these stages; -1 is the kernel's no-op
+        if self.pruned_loaded != (step, self.seen.version):
+            # The fp8 lm_head cache changes only between steps: one row gather per step (or per new set).
+            torch.index_select(lm_head_f8_col.T.view(torch.uint8), 0, self.candidates[:P],
+                               out=inputs.rows.view(torch.uint8))
+            transpose_copy(inputs.rows.view(torch.uint8), inputs.rows_t.view(torch.uint8))
+            self.pruned_loaded = (step, self.seen.version)
+        n = targets.shape[0]
+        inputs.target_pos[:n].copy_(inputs.vocab_pos.index_select(0, targets))
         return inputs

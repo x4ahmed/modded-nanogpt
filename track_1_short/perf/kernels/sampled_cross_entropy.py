@@ -24,13 +24,19 @@ from track_1_short.perf.kernels.cross_entropy import (
     _ce_logit_gemm,
     compile_ce_kernel,
 )
+from track_1_short.portable import config as portable_config
+from track_1_short.portable.vocab_prune import PRUNED_WIDTH
 from track_1_short.sampled_softmax import ALL_CANDIDATE_COUNTS
 
 # The kernel's 8-wide shared-memory and grad stores need P % (BLOCK_SIZE * 8) == 0.
 for _p in ALL_CANDIDATE_COUNTS:
     assert _p % (CE_KERNEL_BLOCK_SIZE * 8) == 0, f"candidate count {_p} is not a legal CE width"
 # P -> the CE kernel compiled at VOCAB_SIZE = P. Built once at import (nvrtc, off the clock), never mutated.
-SAMPLED_CE_KERNELS = {p: compile_ce_kernel(p) for p in ALL_CANDIDATE_COUNTS}
+# experiment/vocab-prune (one GPU only): the pruned full-softmax width. Like the full 50304 it is a
+# multiple of 128, not of 2048: the kernel's tail guard (i < NUM_FULL_LOADS || idx < VOCAB_SIZE) covers
+# the last partial vector pass, as it does at 50304, and 8-wide stores stay aligned (P % 8 == 0).
+CE_WIDTHS = (*ALL_CANDIDATE_COUNTS, PRUNED_WIDTH) if portable_config.PORTABLE else ALL_CANDIDATE_COUNTS
+SAMPLED_CE_KERNELS = {p: compile_ce_kernel(p) for p in CE_WIDTHS}
 
 
 @torch.library.custom_op("nanogpt::sampled_ce_fwd_bwd", mutates_args={"losses", "grad_input"})

@@ -2,8 +2,8 @@
 
 Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). Idea (Notion, 2026-11-05):
 check how often each token appears in the training data and drop the tokens that are not needed.
-Status: census done 2026-11-10 (results below). The training code is the baseline's, unchanged; only
-the census tool is new.
+Status: census done 2026-11-10; dynamic pruning implemented to verify the prediction with a pair
+(section "Dynamic pruning run"). Result pending.
 
 ## Where the vocabulary still costs time
 
@@ -85,6 +85,48 @@ same 268 never occur as inputs) are mostly byte tokens that cannot occur in vali
   validation token at ~80 nats.
 
 No measurable time lever was found; no pair has been run. Closing or continuing is the user's call.
+
+## Dynamic pruning run (verifies the prediction)
+
+User request (2026-11-10): implement pruning in the run and measure it. `track_1_short/portable/vocab_prune.py`,
+wired into `portable/sampled.py` (one GPU only; the 8-GPU path is untouched):
+
+- Every microbatch marks its targets as seen on the GPU (one `index_fill_`), from step 0. No offline
+  counts are used: the set is the run's own targets so far.
+- The record's full-softmax steps 1107-1193 instead run the sampled-softmax kernels over a fixed-width
+  set C of PRUNED_WIDTH = 50,048 ids: every id seen as a target so far, filled with never-seen ids
+  (lowest first, so the 47 padding ids and the highest never-seen ids are left out). Every target of
+  the microbatch is in C, so its loss term is exact; only never-seen ids leave the normalizer and get
+  no lm_head gradient on those steps. If a target outside C appears, C is rebuilt around it (one sync).
+  If the seen ids ever exceed 50,048, that microbatch uses the full softmax (logged; not expected:
+  the census found 49,989 for the whole run).
+- 50,048 is the largest exact cut (the next 128-column step, 49,920, is below 49,989). The CE kernel is
+  compiled at that width; like 50,304 it relies on the kernel's tail guard (P % 2048 != 0).
+- Per step: one lm_head row gather and transpose (the fp8 cache changes only between steps); per
+  microbatch: a host membership check and a device lookup of target positions. The sampled path also
+  densifies the lm_head gradient (a 77 MB pass) that the full path does not need.
+- Validation is unchanged (all 50,304 ids, canonical mask). Logs: `VOCAB_PRUNE width=...` at start,
+  `VOCAB_PRUNE warmup ...` after warmup, `VOCAB_PRUNE run builds=... seen_total=... left_out=...`
+  before `final_val_loss`.
+
+Prediction: time change within about -0.1 to +0.2 s (256 fewer columns on 87 steps, minus the gather
+and densify overheads) and loss change within same-seed noise (~0.001). One pair cannot resolve
+effects below its ~1-2 s time noise, so "no detectable change" is the expected, confirming outcome.
+
+```bash
+source ~/venvs/nanogpt/bin/activate
+cd ~/speed-run/modded-nanogpt
+git fetch origin
+git switch experiment/vocab-prune
+git pull --ff-only origin experiment/vocab-prune
+git show-ref --verify --quiet refs/heads/baseline || git branch baseline origin/baseline
+python -u tools/run_pair.py --seeds 999
+```
+
+`tools/run_pair.py` is copied unchanged from `experiment/attnres-last-init` (GPU smoke gate, which
+also compiles and runs the pruned steps during warmup; then baseline, then candidate; W&B names
+`baseline-for-vocab-prune-1gpu-seed-999` and `vocab-prune-1gpu-seed-999`). CPU tests:
+`tests/test_vocab_prune.py` (set exactness, rebuilds, fallback, warmup interleaving, schedule).
 
 ## Options considered before the census
 

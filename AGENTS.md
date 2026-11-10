@@ -19,8 +19,8 @@
 - Goal: reduce training time at matched validation quality on RTX 5090, with a plausible transfer
   path to 8xH100. Actual multi-GPU validation remains necessary.
 - Frozen baseline: 5be1ba0ca09293a007997cdce51c036bca3e89ae (branch baseline).
-- Active: experiment/vocab-prune (Phase 2, idea 2), directly from baseline. Analysis stage: training
-  code is the baseline's, unchanged; only tools/token_census.py (+ tests, docs) is new.
+- Active: experiment/vocab-prune (Phase 2, idea 2), directly from baseline. Trains the candidate:
+  dynamic vocabulary pruning (portable/vocab_prune.py); also tools/token_census.py and tools/run_pair.py.
 - Entry: run_rtx.sh -> train_gpt_rtx.py; shared architecture: track_1_short/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; training venv: ~/venvs/nanogpt.
 - Training commands require one allocated RTX 5090; no concurrent training on that GPU.
@@ -45,13 +45,18 @@
 - Reading: exact pruning saves <= 0.1 s (width 50,304 -> 50,048), far below pair noise; rarer cuts
   need a fallback probability and stay < 1 s up to count < 100; only a whole-run two-level softmax
   (head ~23.4K ids) reaches 1.9-9.7 s (0.2-1.1%), with new CE kernels and likely loss cost.
-  No pair run. Closing or continuing is the user's call; details in docs/vocab-prune.md.
+- USER REQUEST 2026-11-10: implement pruning and run a pair to verify. Implemented (one GPU only):
+  every microbatch marks its targets seen (GPU); steps 1107-1193 run the sampled CE kernels over a
+  fixed 50,048-wide set = ids seen as targets so far + never-seen fill (exact for every target; C is
+  rebuilt if a new id appears; full-softmax fallback if > 50,048 seen). Logs VOCAB_PRUNE lines.
+  Prediction: time -0.1..+0.2 s, loss within noise. PAIR PENDING (user runs it). docs/vocab-prune.md.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
   short report and CENSUS_COMPLETE dir=logs/token-census/<UTC> (counts.npz, summary.json).
-- Pair runner: tools/run_pair.py lives on experiment/attnres-last-init; copy it unchanged once this
-  branch changes training.
+- Pair: python -u tools/run_pair.py --seeds 999 (copied unchanged from experiment/attnres-last-init;
+  full command block in docs/vocab-prune.md). W&B: baseline-for-vocab-prune / vocab-prune-1gpu-seed-N.
+  Standalone runs of this branch self-name vocab-prune-1gpu-seed-N.
 - GPU smoke: python -u tests/check_rtx5090.py --seed 999.
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 

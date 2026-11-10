@@ -51,12 +51,12 @@ class LauncherTests(unittest.TestCase):
             with self.subTest(seed=seed):
                 result, args, _ = self.launch(TRAIN_SEED=str(seed))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(f"--name\nbaseline-1gpu-seed-{seed}\n", args)
+                self.assertIn(f"--name\nvocab-prune-1gpu-seed-{seed}\n", args)
 
     def test_missing_seed_is_not_mislabeled(self):
         result, args, _ = self.launch(TRAIN_SEED="")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--name\nbaseline-1gpu-seed-unseeded\n", args)
+        self.assertIn("--name\nvocab-prune-1gpu-seed-unseeded\n", args)
         self.assertNotIn("--seed\n", args)
 
     def test_preflight_and_optout_skip_upload(self):

@@ -58,6 +58,7 @@ from track_1_short.portable.grads import GradAccumulator
 from track_1_short.portable.memory import MemoryReport, gib
 from track_1_short.portable.sampled import PortableSampledSoftmax
 from track_1_short.portable.tables import LocalNgramTable, LocalTables, LocalValueEmbeds
+from track_1_short.portable.vocab_prune import PRUNED_WIDTH
 from track_1_short.schedule import TrainingSchedule
 from track_1_short.tail_average import TailAverages
 from track_1_short.training import TrainingManager
@@ -102,7 +103,7 @@ class Trainer:
             tokens = batch.inputs.numel()
             masks = build_window_masks(batch.cum_seqlens, tokens, windows.ws_short, windows.ws_long)
             # After the last fp8 refresh (end of the previous step), so the gathered rows are current.
-            sampled_loss = self.sampled.prepare(step, batch.targets_cpu, self.uncompiled.lm_head_f8_col)
+            sampled_loss = self.sampled.prepare(step, batch.targets_cpu, self.uncompiled.lm_head_f8_col, batch.targets)
             sink = self.ngram.grad_sink(tokens)
             loss = model(batch.inputs, batch.targets, batch.cum_seqlens, batch.ngram_ids, tm.get_forward_args(sampled_loss),
                          ngram_sink=sink, value_embed_grad=self.value_embeds.grad_accum, window_masks=masks).sum()
@@ -170,6 +171,10 @@ def main():
     model.quantize_mlp_fp8(refresh_lm=True)
     prime_stage_cache()
     sampled = PortableSampledSoftmax(schedule, model.vocab_size, model.lm_head.in_features, mb_tokens, device)
+    pruned = sorted(sampled.pruned_steps & set(range(total_steps)))
+    print0(f"VOCAB_PRUNE width={PRUNED_WIDTH} of {model.vocab_size} on the full-softmax steps "
+           f"{pruned[0] if pruned else '-'}-{pruned[-1] if pruned else '-'} ({len(pruned)} steps); "
+           f"candidates = ids seen as training targets so far", console=True)
 
     uncompiled = model
     model = torch.compile(model, dynamic=False, fullgraph=True)
@@ -212,6 +217,7 @@ def main():
             memory.mark("after_first_warmup_step")
     torch.cuda.synchronize()
     print0(f"Warmup done in {time.perf_counter() - warmup_start:.0f}s", console=True)
+    print0(f"VOCAB_PRUNE warmup {sampled.seen.summary()}", console=True)
     memory.mark("after_warmup")
     del warmup_loader
 
@@ -319,6 +325,7 @@ def main():
     print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
            f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
     memory.verdict()
+    print0(f"VOCAB_PRUNE run {sampled.seen.summary()}", console=True)
     print0(f"final_val_loss={val_loss.item():.6f} training_time_ms={training_time_ms:.0f} "
            f"peak_memory_allocated={gib(torch.cuda.max_memory_allocated())}", console=True)
     flush_log()
