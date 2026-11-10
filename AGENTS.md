@@ -1,83 +1,88 @@
 # Agent handoff
 
 ## Working rules
-- Keep replies short, outcome first; normally under eight lines when practical.
-- For coding work report changes, files, verification, and unresolved issues.
+- Keep replies short and outcome first. Never omit failed checks or material limits.
 - Preserve the RTX adaptation and unrelated user changes. Do not restore old v1 plans.
-- User permits commits and pushes to the current remote branch. Never force-push.
-- Do not claim GPU validation from CPU tests. The user runs GPU checks on the cluster.
-- Update this file after meaningful changes, test results, or decisions, before handoff.
-- Replace stale summaries rather than appending a diary. Keep under 100 lines.
-- Keep only current settings, verified results, blockers, and next steps here.
-- Put long logs in logs/ and test instructions in tests/README.md; never copy logs here.
-- Do not silently change the model, precision, dataset, schedule, or validation metric.
+- User permits commits and pushes. Never force-push or move the frozen baseline.
+- Every experiment branches directly from baseline; never stack or merge experiments.
+- PHASE 2 RULE (user, 2026-11-08): every experiment runs as a pair with a fresh baseline run: same
+  seed, GPU allocation, environment, data and validation settings. Compare loss AND time only within
+  that pair (tools/run_pair.py). Historical results alone are never the control.
+- Start with seed 999; expand to paired seeds 1000-1003 only if loss beats its paired baseline by > 0.002.
+- Never SSH/scp to the cluster. The user executes cluster commands and shares output.
+- CPU checks are not GPU validation. No speed/quality claim without full-run evidence.
+- Whether to continue or close an idea is the user's decision; report results, do not declare stops.
+- Update this file after every change/result/decision. Replace stale text; keep under 100 lines.
+  Put protocols in docs/ and tests/, large results in logs/.
 
-## Goal and repository
-- Establish a reproducible local single-RTX-5090 training baseline, then optimize it.
-- Branch: rtx-local-v2. Remote: https://github.com/x4ahmed/modded-nanogpt.
-- Current adaptation is track_1_short (ANVIL2); original track_1_short is not disposable.
-- Entrypoint: run_rtx.sh -> train_gpt_rtx.py; adaptation helpers: track_1_short/portable/.
-- Cluster checkout: ~/speed-run/modded-nanogpt; venv: ~/venvs/nanogpt.
-- Cluster uses Slurm; commands below require an existing one-GPU allocation.
+## Repository and goal
+- Goal: reduce training time at matched validation quality on RTX 5090, with a plausible transfer
+  path to 8xH100. Actual multi-GPU validation remains necessary.
+- Frozen baseline: 5be1ba0ca09293a007997cdce51c036bca3e89ae (branch baseline).
+- Active: experiment/vocab-prune (Phase 2, idea 2), directly from baseline. Analysis stage: training
+  code is the baseline's, unchanged; only tools/token_census.py (+ tests, docs) is new.
+- Entry: run_rtx.sh -> train_gpt_rtx.py; shared architecture: track_1_short/.
+- Cluster checkout: ~/speed-run/modded-nanogpt; training venv: ~/venvs/nanogpt.
+- Training commands require one allocated RTX 5090; no concurrent training on that GPU.
+- Local CPU tests: C:/Users/Ahmed/anaconda3/python.exe (torch 2.8, CPU); plain `python` is not on PATH.
 
-## Configuration to preserve
-- One RTX 5090 (SM120, 32 GB); observed torch 2.10.0+cu128 / CUDA 12.8.
-- PORTABLE=1; RTX_MICROBATCH_TOKENS=16384; RTX_NGRAM_DIVISOR=32.
-- N-gram table has 2,643,840 rows; this is a capacity reduction from upstream.
-- Stage accumulation counts: 8/16/24/20/8; retain existing gradient scaling.
-- RTX_EVAL_CE_SLAB_ROWS=4096; RTX_WARMUP_MICROBATCHES=2.
-- Validated RTX_VAL_SEQ_LEN=65536. Default is 262144, NOT validated by this check.
-- Keep validation packing fixed across local comparisons; do not claim upstream metric parity.
-- Full default schedule: 1194 optimizer updates. Remove RTX_MAX_STEPS for full runs.
-- Leave NUM_SCHEDULED_ITERATIONS unset; short tests truncate, never rescale the schedule.
-- Notion's existing seed plan is 999, 1000, 1001, 1002, 1003; 999 complete, four pending.
-- Training log is logs/<generated UUID>.txt; capture console separately for warnings.
+## This idea: vocabulary pruning (docs/vocab-prune.md)
+- Notion idea (2026-11-05): count how often each token appears in training data; drop unneeded ones.
+- The record already prunes: sampled softmax (record #360) trains steps 0-1106 over 10,240-24,576
+  candidates (all microbatch targets + uniform stride negatives), not 50,304 ids; validation masks ids
+  the tokenizer cannot emit after the previous token (canonical mask, #350). Validation forward is
+  off the clock.
+- What a smaller vocabulary still speeds up: the full softmax of steps 1107-1193 (87 steps, 24.6M of
+  328.7M training tokens) and V-sized Adam updates. Anchor: record_late (2026-10-28) ran the taper at
+  P=24,576 instead of 50,304 and saved 1.7 s -> ~0.1 s (FLOP bound ~0.4 s) per 1,000 ids removed;
+  same-allocation time noise ~1-2 s.
+- Out of scope: retokenizing (changes the metric); choosing ids from validation counts (peeking).
+  A removed id must keep finite probability: a validation token on it costs ~80 nats under -60 masking.
+- NOW: census pending (user runs it). tools/token_census.py replays the exact one-GPU training stream
+  (loader slicing, stage document cuts, 16,384-token microbatches; 328,663,040 targets) and counts
+  every id as target/input, plus validation targets (risk measurement only). CPU only, no GPU.
+- After the census: < ~5,000 removable ids (train count 0, ~0 validation hits) means the gain is
+  below pair noise; report that. Otherwise options A (pruned output in the full-softmax steps via the
+  sampled path, fixed seen-id set) or B (eval-time mask of never-seen ids, measured exactly inside one
+  run) in docs/vocab-prune.md, each paired.
 
-## Last verified state (2026-10-18)
-- Code commit f466280 fixed the observed fused-MLP NaNs on the user's 5090.
-- Narrow 128-column MLP tiles use masked pointer stores, forward/backward, both layouts.
-- FP8 math/scales and model structure were retained; wide-tile path retains descriptor stores.
-- All nine diagnostic cases passed, including sampled/full loss forward and backward.
-- MLP repeated eager/compiled forward and independent backward parity checks passed.
-- tests/check_rtx5090.py passed all sampled warmup stages, two full updates, and validation.
-- Validation loss after two updates: 8.883883 (not a convergence/baseline result).
-- Peak allocated 20.01 GiB; reserved 24.57 GiB; reported headroom 2.00 GiB.
-- Twenty-one CPU/Bash tests passed (runner, stores, uploader, launcher); no local test GPU.
-- First full pilot completed: seed 999, launch commit 9f0dfb9, 1194/1194 updates.
-- Pilot final validation loss 3.294856; recorded training time 837067 ms (13m57.067s).
-- Pilot warmup 95s (separate); peak allocated 19.99 GiB, reserved 20.76 GiB, headroom 5.81 GiB PASS.
-- Pilot log: logs/7911de55-2adc-4ef7-b53a-a2a5db3e2edb.txt; predates W&B integration.
-- Supplied pilot output has finite logged losses and no canonical-mask fallback warning.
-- Evidence of learning/completion, not proof of upstream parity or multi-seed stability.
+## Commands
+- Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
+  short report and CENSUS_COMPLETE dir=logs/token-census/<UTC> (counts.npz, summary.json).
+- Pair runner: tools/run_pair.py lives on experiment/attnres-last-init; copy it unchanged once this
+  branch changes training.
+- GPU smoke: python -u tests/check_rtx5090.py --seed 999.
+- CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 
-## Open issue and next steps
-- Smoke test's canonical-mask worker failed with wait status 9; full pilot did not reproduce it.
-- canonical_mask.py wait() can SIGKILL after 60 seconds; cause not proven to be host OOM.
-- Mask wait/rebuild is timed. Smoke run's 281930 ms is not clean optimizer throughput.
-- Continue tracking mask warnings; never silently exclude mask overhead from timings.
-- Keep training code/settings fixed; finish seeds 1000-1003. Report mean and sample SD (n-1).
-- One full pilot exists; no statistically established v2 baseline yet.
-- Notion root, Progress, Overview, Planning, Baseline and Sarmata now reflect the successful pilot.
-- Progress seed-results table: https://www.notion.so/3cb0b758a24e81faa372fac85828c1a0 (1/5 complete).
+## Frozen local settings
+- One RTX 5090 (SM120, 32 GB); PORTABLE=1.
+- RTX_MICROBATCH_TOKENS=16384; RTX_NGRAM_DIVISOR=32 (2,643,840 n-gram rows).
+- Stage accumulation counts 8/16/24/20/8; retain existing gradient scaling.
+- RTX_VAL_SEQ_LEN=65536; RTX_EVAL_CE_SLAB_ROWS=4096.
+- RTX_WARMUP_MICROBATCHES=2; RTX_MIN_HEADROOM_GIB=1.5.
+- Full schedule: 1194 optimizer updates. Unset RTX_MAX_STEPS, RTX_PREFLIGHT and
+  NUM_SCHEDULED_ITERATIONS. Short tests truncate, never rescale schedules.
+- Keep local validation packing fixed; do not claim upstream metric parity.
 
-## Verification commands
-- GPU diagnostics: python -u tests/diagnose_rtx5090.py
-- GPU smoke: python -u tests/check_rtx5090.py
-- CPU: python -m unittest discover -s tests -p 'test_*.py' -v
-- Diagnostic cases are isolated; BF16 controls are tests, not production configuration.
-- Keep diagnostic timings separate from uninstrumented full training timings.
+## Results so far
+- Five-seed baseline at 5be1ba0: loss 3.2948572 +/- 0.00104874 SD; time 861.635 +/- 1.608645 s SD.
+  Same-seed reruns vary ~0.001 in loss; wall time drifts ~15 s between sessions (hence pairs).
+- Phase 1, none promoted. Five seeds, unpaired: block AttnRes (Exp 1, zero init) +0.036 / +10%;
+  minimal AttnRes readout +0.010 / +0.6%; bigram prior +0.0025 / +0.85%; Gated DeltaNet +0.0041 / +8.2%.
+- Phase 1, seed 999: sampled-softmax taper +0.0064 / -1.7 s; per-head V/O whitening +0.012; whole Q/K
+  whitening -0.001 (noise); layer smear -0.0009 / +4%; low-rank parallel MLP +0.0021 / -0.02% (paired).
+- Eval-time sweep (temperature/windows): record settings already best. Async uploads -1.7% (local-only,
+  kept on its own branch). Gram NS: little total-run potential.
+- Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
+  last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
+- Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done above), vocabulary pruning (this), mHC.
+  Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 = the AttnRes pairs.
+- Canonical-mask warnings and rebuild time remain part of measured training time.
 
-## Post-training monitoring
-- tools/upload_wandb.py imports completed logs only; training code/timer unchanged.
-- Setup/API-key guidance: tools/README.md; use a separate uploader venv, no GPU needed.
-- Preview with --dry-run; never upload raw source logs or put API keys in Git/chat.
-- Compare recorded training_time_ms, not W&B uploader runtime. Do not infer training commit/seed.
-- Upload one log per run; stable content-based IDs refuse duplicate online imports.
-- User screenshot confirms W&B upload succeeded. Uploader venv required pip installation via training pip --python.
-- Future uploads plot training loss vs optimizer step, training seconds and minutes; axis-only plots hidden.
-- Loss/time uses each training-loss line's timestamp, not later validation/finalization at the same step.
-- Final loss, total time and memory remain summary metrics; old workspace panels need manual hiding.
-- run_rtx.sh auto-uploads to i-learn/speedrun only after successful non-preflight runs.
-- Uses ~/venvs/wandb-upload/bin/python (override WANDB_UPLOAD_PYTHON); RTX_WANDB_UPLOAD=0 opts out.
-- Launcher saves console log and captures launch commit/seed; upload failure retains local results.
-- Launcher names W&B runs baseline-1gpu-seed-<seed>; repeat names do not overwrite distinct run IDs.
+## Logging
+- Trainer log: logs/<UUID>.txt; launcher console: logs/run-*.console.txt.
+- W&B entity/project i-learn/speedrun, uploaded only after training ends.
+- Uploader: ~/venvs/wandb-upload/bin/python (WANDB_UPLOAD_PYTHON override).
+- Paired names (Phase 2): baseline-for-<label>-1gpu-seed-N and <label>-1gpu-seed-N, set by the runner.
+  Plain baseline-1gpu-seed-N = historical/unpaired baselines only. Names are display-only (IDs = log hash).
+- Never expose API keys or upload raw source logs. Upload failure retains local results.
