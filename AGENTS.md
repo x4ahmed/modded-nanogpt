@@ -78,7 +78,8 @@
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done above), vocabulary pruning (this branch;
   census shows no measurable time lever), mHC (not started).
-  Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 = the AttnRes pairs.
+  Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 = the AttnRes pairs. Its "Phase 2: Idea
+  Notes" bullets carry What we did / Conclusion sub-bullets (AttnRes, pruning) and mHC "not started".
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging
