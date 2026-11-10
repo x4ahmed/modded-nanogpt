@@ -11,6 +11,9 @@ W&B: neither arm uploads itself (the frozen baseline would name itself plain "ba
 arms, both logs are imported under the pair's names, from the branch name without "experiment/":
 baseline-for-<label>-1gpu-seed-<seed> and <label>-1gpu-seed-<seed>. Upload runs after training, never
 on the clock; a failed upload keeps the local results and prints a retry command.
+
+--candidate-env KEY=VALUE (repeatable, RTX_* only) sets a knob for the gates and the candidate arm only,
+never the baseline: e.g. RTX_VOCAB_PRUNE_MASS=0.05 for one point of a sweep (give each point a --label).
 """
 import argparse
 from datetime import datetime, timezone
@@ -111,7 +114,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seeds", nargs="+", type=int, default=[999])
     parser.add_argument("--label", help="W&B experiment label; default: branch name without experiment/.")
+    parser.add_argument("--candidate-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="RTX_* setting for the gates and the candidate arm only (repeatable).")
     args = parser.parse_args()
+    candidate_env = dict(item.split("=", 1) for item in args.candidate_env if "=" in item)
+    if len(candidate_env) != len(args.candidate_env) or not all(k.startswith("RTX_") for k in candidate_env):
+        parser.error("--candidate-env takes RTX_KEY=VALUE")
     if len(set(args.seeds)) != len(args.seeds) or any(seed < 0 for seed in args.seeds):
         parser.error("seeds must be distinct nonnegative integers")
     experiment = git("branch", "--show-current")
@@ -125,7 +133,7 @@ def main():
     candidate_commit = git("rev-parse", "HEAD")
     if candidate_commit == BASELINE_COMMIT or git("merge-base", BASELINE, "HEAD") != BASELINE_COMMIT:
         raise RuntimeError("Candidate must be a new commit descending from the frozen baseline.")
-    env = run_env(args.seeds[0])
+    env = run_env(args.seeds[0]) | candidate_env
     for gate in GATES:
         command = [part.format(seed=args.seeds[0]) for part in gate]
         subprocess.run([sys.executable, "-u", *command], cwd=ROOT, env=env, check=True)
@@ -134,12 +142,13 @@ def main():
     for seed in args.seeds:
         names = pair_names(label, seed)
         report = dict(experiment=experiment, label=label, seed=seed, status="running", order=["baseline", "candidate"],
+                      candidate_env=candidate_env,
                       settings={k: v for k, v in run_env(seed).items() if k.startswith("RTX_") or k in ("TRAIN_SEED", "PORTABLE")})
         path = folder / f"seed-{seed}.json"
         try:
             report["baseline"] = run_arm(BASELINE, BASELINE_COMMIT, seed, run_env(seed))
             path.write_text(json.dumps(report, indent=2) + "\n")
-            report["candidate"] = run_arm(experiment, candidate_commit, seed, run_env(seed))
+            report["candidate"] = run_arm(experiment, candidate_commit, seed, run_env(seed) | candidate_env)
             report.update(paired_deltas(report["baseline"], report["candidate"]), status="complete")
         except BaseException as exc:
             report.update(status="failed", error=str(exc))

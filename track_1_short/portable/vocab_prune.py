@@ -1,6 +1,15 @@
-"""Dynamic vocabulary pruning of the full-softmax steps (Phase 2 idea 2; docs/vocab-prune.md).
+"""Dynamic vocabulary pruning (Phase 2 idea 2; docs/vocab-prune.md). Two modes, chosen per run by
+RTX_VOCAB_PRUNE_MASS (portable/config.py):
 
-What: from step 0, every microbatch's targets are marked "seen" on the GPU (one index_fill per
+- mass 0, "exact" (SeenTargets below): only ids never seen as a training target leave the softmax, on
+  the full-softmax steps only.
+- mass m > 0, "ranked" (RankedCandidates below): on EVERY step the candidate set is the microbatch's
+  targets plus the most frequent ids seen so far in this run, at width min(record width, ranked_width(m)),
+  where ranked_width(m) is the number of ids that cover 1 - m of the training text (census table below).
+  Every target stays a candidate, so its loss term is exact; only ids ranked below the cut that are not
+  a target of the microbatch leave the normalizer. No fallback is needed. Validation is untouched.
+
+Exact mode in detail: from step 0, every microbatch's targets are marked "seen" on the GPU (one index_fill per
 microbatch). The steps the record runs on the full softmax (1107-1193) instead normalize over a
 candidate set C of PRUNED_WIDTH ids: every id that has been a training target so far -- so every target
 of the microbatch is in C and its loss term is exact -- filled up with never-seen ids, lowest ids first
@@ -26,6 +35,73 @@ import torch
 
 PRUNED_WIDTH = 50_048
 assert PRUNED_WIDTH % 128 == 0
+
+# Ranked mode. Ids that cover 1 - m of the run's training targets (tools/token_census.py, 2026-11-10,
+# training data only; the loader is deterministic, so every run sees the same tokens): mass m -> ids.
+KEPT_IDS_BY_MASS = {0.001: 46_223, 0.01: 36_968, 0.02: 30_912, 0.05: 19_977, 0.07: 15_532,
+                    0.10: 11_038, 0.15: 6_576, 0.20: 4_062, 0.30: 1_623}
+# Every target of a microbatch must be a candidate: at most 5,292 distinct targets per 16,384-token
+# microbatch over the whole run (census, stage 1), so no width goes below 6,144.
+MIN_RANKED_WIDTH = 6_144
+RANKED_MICROBATCH_TOKENS = 16_384
+
+
+def ranked_width(mass: float) -> int:
+    """The candidate width of pruning mass `mass`: its kept ids, rounded up to 128, at least the floor."""
+    kept = KEPT_IDS_BY_MASS[mass]
+    return max(MIN_RANKED_WIDTH, -(-kept // 128) * 128)
+
+
+def ranked_counts(record_counts: list[int], mass: float, vocab_size: int) -> list[int]:
+    """Per-step widths in ranked mode: the record's width (full softmax = vocab_size), capped at the mass's."""
+    width = ranked_width(mass)
+    return [min(count or vocab_size, width) for count in record_counts]
+
+
+class RankedCandidates:
+    """Ranked-mode candidate sets, built on the device with no host work and no sync.
+
+    Per microbatch: count the targets (the ranking's data: this run's targets so far), then select every
+    target plus the best-ranked non-targets up to `width`, ascending by id (the kernels' layout). The
+    ranking (ids by count, descending) is recomputed once per step, from the counts before that step.
+    """
+
+    def __init__(self, vocab_size: int, max_rows: int, device):
+        self.vocab_size = vocab_size
+        self.counts = torch.zeros(vocab_size, dtype=torch.int32, device=device)
+        self.is_target = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        self.extra = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        self.ones = torch.ones(max_rows, dtype=torch.int32, device=device)
+        self.overflow = torch.zeros((), dtype=torch.int64, device=device)
+        self.reset()
+
+    def reset(self):
+        self.counts.zero_()
+        self.overflow.zero_()
+        self.order = torch.arange(self.vocab_size, device=self.counts.device)
+        self.ranked_step: int | None = None
+
+    def build(self, step: int, targets: torch.Tensor, width: int) -> torch.Tensor:
+        """(width,) int64 candidate ids, ascending: all of `targets` plus the best-ranked other ids."""
+        if self.ranked_step != step:
+            self.order = torch.argsort(self.counts, descending=True, stable=True)
+            self.ranked_step = step
+        self.counts.index_add_(0, targets, self.ones[:targets.numel()])
+        self.is_target.zero_()
+        self.is_target.index_fill_(0, targets, True)
+        n_targets = self.is_target.sum()
+        # Non-targets in rank order; keep the first width - n_targets of them.
+        free = ~self.is_target[self.order]
+        take = free & (torch.cumsum(free, 0) <= width - n_targets)
+        self.extra.index_put_((self.order,), take)
+        # More distinct targets than the width cannot happen at the census floor; counted, never silent.
+        self.overflow += n_targets > width
+        selected = self.is_target | self.extra
+        return torch.argsort((~selected).to(torch.int8), stable=True)[:width]
+
+    def summary(self) -> str:
+        """Reads the device counters (a sync): call off the clock."""
+        return f"overflow_microbatches={int(self.overflow.item())} distinct_seen={int((self.counts > 0).sum().item())}"
 
 
 def pruned_counts(counts: list[int]) -> list[int]:

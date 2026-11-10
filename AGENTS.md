@@ -20,7 +20,7 @@
   path to 8xH100. Actual multi-GPU validation remains necessary.
 - Frozen baseline: 5be1ba0ca09293a007997cdce51c036bca3e89ae (branch baseline).
 - Active: experiment/vocab-prune (Phase 2, idea 2), directly from baseline. Trains the candidate:
-  dynamic vocabulary pruning (portable/vocab_prune.py); also tools/token_census.py and tools/run_pair.py.
+  vocabulary pruning (portable/vocab_prune.py, knob RTX_VOCAB_PRUNE_MASS); tools/token_census.py.
 - Entry: run_rtx.sh -> train_gpt_rtx.py; shared architecture: track_1_short/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; training venv: ~/venvs/nanogpt.
 - Training commands require one allocated RTX 5090; no concurrent training on that GPU.
@@ -48,18 +48,18 @@
   fixed 50,048-wide set = ids seen as targets so far + never-seen fill (exact for every target; C is
   rebuilt if a new id appears; full-softmax fallback if > 50,048 seen). Logs VOCAB_PRUNE lines.
   Prediction: time -0.1..+0.2 s, loss within noise. Pair not run yet; it is the 0% point of the sweep.
-- NEXT (user, 2026-11-10): sweep RTX_VOCAB_PRUNE_MASS (share of training text whose tokens may leave
-  the softmax) over ALL steps: candidates = every microbatch target + most frequent ids seen so far,
-  at narrower widths than 10,240-24,576 (sampled steps hold ~13-65 s of output-layer time). Validation
-  untouched; no fallback needed (targets stay exact). Waiting on census rerun: per-stage distinct
-  targets per microbatch (width floor) and 70-98% coverage (mass -> width). Not implemented yet.
+- RANKED SWEEP (user, 2026-11-10), implemented, not yet run: RTX_VOCAB_PRUNE_MASS=m > 0 -> every step
+  uses microbatch targets + most frequent ids so far (GPU-built), width min(record, W(m)); W(m) = ids
+  covering 1-m of training text (census rerun: 90% 11,038; 85% 6,576; 95% 19,977), floor 6,144 (max
+  5,292 distinct targets per microbatch). Masses: 0.001-0.30 (0.20 = 0.30 = floor). Ceilings 0.10:
+  6-32 s, 0.15: 10-53 s. Risk: never-negative rare logits drift. Sweep: 0.15, 0.10, 0.05, 0.01.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
   short report and CENSUS_COMPLETE dir=logs/token-census/<UTC> (counts.npz, summary.json).
-- Pair: python -u tools/run_pair.py --seeds 999 (copied unchanged from experiment/attnres-last-init;
-  full command block in docs/vocab-prune.md). W&B: baseline-for-vocab-prune / vocab-prune-1gpu-seed-N.
-  Standalone runs of this branch self-name vocab-prune-1gpu-seed-N.
+- Pair per mass: python -u tools/run_pair.py --seeds 999 --label vocab-prune-m<m> --candidate-env
+  RTX_VOCAB_PRUNE_MASS=<m> (run_pair gained --candidate-env here: gate + candidate only). Loop in
+  docs/vocab-prune.md. Standalone runs self-name vocab-prune-m<m>-1gpu-seed-N.
 - GPU smoke: python -u tests/check_rtx5090.py --seed 999.
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 

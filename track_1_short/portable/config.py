@@ -13,6 +13,9 @@ under PORTABLE and default to values sized for one 32 GB RTX 5090:
   RTX_WARMUP_MICROBATCHES  microbatches per warmup step (default 2: compiles every graph and exercises
                          the accumulation path; the warmup is untimed and its state is discarded).
   RTX_MAX_STEPS          stop after this many optimizer steps (smoke tests); the run then validates.
+  RTX_VOCAB_PRUNE_MASS   experiment/vocab-prune: 0 (default) = exact pruning of never-seen ids on the
+                         full-softmax steps; m in vocab_prune.KEPT_IDS_BY_MASS = ranked pruning on every
+                         step at the width covering 1 - m of the training text (portable/vocab_prune.py).
 """
 import os
 
@@ -28,9 +31,16 @@ VAL_SEQ_LEN = int(os.environ.get("RTX_VAL_SEQ_LEN", "262144"))
 EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
+VOCAB_PRUNE_MASS = float(os.environ.get("RTX_VOCAB_PRUNE_MASS") or "0")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048
 assert VAL_SEQ_LEN % 128 == 0, "validation forwards are whole attention blocks"
 assert EVAL_CE_SLAB_ROWS > 0 and WARMUP_MICROBATCHES >= 1
 assert MAX_STEPS is None or MAX_STEPS >= 1
+if VOCAB_PRUNE_MASS:
+    from track_1_short.portable.vocab_prune import KEPT_IDS_BY_MASS, RANKED_MICROBATCH_TOKENS
+    if VOCAB_PRUNE_MASS not in KEPT_IDS_BY_MASS:
+        raise ValueError(f"RTX_VOCAB_PRUNE_MASS={VOCAB_PRUNE_MASS}: use 0 or one of {sorted(KEPT_IDS_BY_MASS)}")
+    # The width floor comes from the census at 16,384-token microbatches.
+    assert MICROBATCH_TOKENS == RANKED_MICROBATCH_TOKENS, "ranked pruning is sized for 16384-token microbatches"

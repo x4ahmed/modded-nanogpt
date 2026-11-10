@@ -2,8 +2,8 @@
 
 Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). Idea (Notion, 2026-11-05):
 check how often each token appears in the training data and drop the tokens that are not needed.
-Status: census done 2026-11-10; dynamic pruning implemented to verify the prediction with a pair
-(section "Dynamic pruning run"). Result pending.
+Status: census done 2026-11-10; exact pruning (mass 0) and ranked pruning over all steps (mass m > 0,
+section "Ranked pruning sweep") implemented. No GPU run yet.
 
 ## Where the vocabulary still costs time
 
@@ -128,14 +128,49 @@ also compiles and runs the pruned steps during warmup; then baseline, then candi
 `baseline-for-vocab-prune-1gpu-seed-999` and `vocab-prune-1gpu-seed-999`). CPU tests:
 `tests/test_vocab_prune.py` (set exactness, rebuilds, fallback, warmup interleaving, schedule).
 
-## Next: frequency-ranked pruning sweep over all steps (planned)
+## Ranked pruning sweep (all steps)
 
-User plan (2026-11-10): a per-run knob, the share of training text whose tokens may be pruned, applied
-to every step. Candidates per microbatch = all its targets (exact loss) + the most frequent ids seen so
-far in this run, at fixed widths below the record's 10,240 / 14,336 / 24,576 and 50,304. Validation is
-untouched. Steps 0-1106 carry ~13 s (measured rate) to ~65 s (FLOP bound) of output-layer time, so a
-sweet spot is plausible. Widths need two census numbers, now reported by tools/token_census.py:
-distinct targets per microbatch by stage (the floor) and ids covering 70-98% of training text.
+User plan (2026-11-10). Knob `RTX_VOCAB_PRUNE_MASS=m`: the share of training text whose tokens may
+leave the softmax. On every step the candidate set is the microbatch's targets (exact loss, no fallback
+needed) plus the most frequent ids seen so far in this run, at width min(record width, W(m)), where W(m)
+= the ids covering 1 - m of the training text (census, 2026-11-10 rerun), rounded up to 128, at least
+6,144 (the census max is 5,292 distinct targets per 16,384-token microbatch; the loader is deterministic,
+so this holds for every run). Built on the GPU (`RankedCandidates`: per-step argsort of the run's target
+counts, per-microbatch selection; no host builder, no upload, no sync). Validation untouched.
+
+| m | Widths used (record capped at W) | Output-layer time saved: measured rate - FLOP bound |
+| --- | --- | --- |
+| 0.001 | 10,240 / 14,336 / 24,576 / 46,336 | 0.3 - 1.5 s |
+| 0.01 | 10,240 / 14,336 / 24,576 / 36,992 | 1.0 - 5.0 s |
+| 0.05 | 10,240 / 14,336 / 20,096 | 3.0 - 15.3 s |
+| 0.10 | 10,240 / 11,136 | 6.2 - 31.9 s |
+| 0.15 | 6,656 | 10.3 - 52.7 s |
+| 0.20, 0.30 | 6,144 (floor; identical runs) | 10.8 - 55.3 s |
+
+The whole output layer costs 16.8 s (measured rate) to 86.4 s (FLOP bound) over the run. Even where the
+width equals the record's, the fill changes from uniform stride negatives to frequency-ranked ids (and
+the host builder to the device one), so low-m points also measure that change. Main risk: ids below the
+cut are never negatives unless they are targets, so their logits may drift up and cost validation loss;
+the sweep measures where that starts. Part of any gain may be port-specific: the record's 8-GPU
+microbatches are 3x larger, so its candidate sets need more room.
+
+Each point is its own pair (`--candidate-env` sets the knob for the gate and candidate only):
+
+```bash
+source ~/venvs/nanogpt/bin/activate
+cd ~/speed-run/modded-nanogpt
+git fetch origin
+git switch experiment/vocab-prune
+git pull --ff-only origin experiment/vocab-prune
+git show-ref --verify --quiet refs/heads/baseline || git branch baseline origin/baseline
+for m in 0.15 0.10 0.05 0.01; do
+  python -u tools/run_pair.py --seeds 999 --label vocab-prune-m$m --candidate-env RTX_VOCAB_PRUNE_MASS=$m
+done
+```
+
+Logs: `VOCAB_PRUNE mode=ranked mass=... width=... (widths by stage)` at start and
+`VOCAB_PRUNE run overflow_microbatches=0 distinct_seen=...` before `final_val_loss`. CPU tests:
+`tests/test_vocab_prune.py` (widths, ranking and selection, target/prefix mapping, config validation).
 
 ## Options considered before the census
 

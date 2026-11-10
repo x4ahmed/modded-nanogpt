@@ -11,27 +11,34 @@ The negatives come from one stride sweep that advances with every build (the rec
 sweep per rank instead): consecutive microbatches get disjoint negative windows, and across a run every
 class is visited uniformly, which is what the staggering is for.
 
-experiment/vocab-prune: the record's full-softmax steps run here at width PRUNED_WIDTH over the ids
-seen as training targets so far (portable/vocab_prune.py); every microbatch marks its targets as seen.
+experiment/vocab-prune (portable/vocab_prune.py): with pruning mass 0 the record's full-softmax steps
+run at width PRUNED_WIDTH over the ids seen as training targets so far; with mass m > 0 every step runs
+at min(record width, ranked_width(m)) over the microbatch's targets plus the most frequent ids so far,
+built on the device (no host builder, no upload).
 """
 import numpy as np
 import torch
 from torch import Tensor
 
 from track_1_short.perf.kernels.transpose import transpose_copy
-from track_1_short.portable.vocab_prune import PRUNED_WIDTH, SeenTargets, pruned_counts
+from track_1_short.portable import config as rtx
+from track_1_short.portable.vocab_prune import (
+    PRUNED_WIDTH, RankedCandidates, SeenTargets, pruned_counts, ranked_counts, ranked_width,
+)
 from track_1_short.sampled_softmax import CandidateBuilder, SampledLoss, _stage_index, candidate_count_at
 from track_1_short.schedule import TrainingSchedule
 
 
 class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
-                 device: torch.device):
+                 device: torch.device, mass: float | None = None):
         self.schedule = schedule
+        self.mass = rtx.VOCAB_PRUNE_MASS if mass is None else mass
         record_counts = [candidate_count_at(schedule, s) for s in range(schedule.total_steps + 1)]
-        # The record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
+        # Exact mode: the record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
         self.pruned_steps = frozenset(s for s, count in enumerate(record_counts) if not count)
-        self.counts = pruned_counts(record_counts)
+        self.counts = (ranked_counts(record_counts, self.mass, vocab_size) if self.mass
+                       else pruned_counts(record_counts))
         p_values = sorted(set(self.counts) - {0})
         assert p_values
         max_p = max(p_values)
@@ -50,17 +57,39 @@ class PortableSampledSoftmax:
             for p in p_values
         }
         self.seen = SeenTargets(vocab_size, PRUNED_WIDTH, device)
+        self.ranked = RankedCandidates(vocab_size, max_rows, device) if self.mass else None
+        self.prefix_table_d: Tensor | None = None
         self.reset()
 
     def reset(self):
         self.builder.reset(rank=0, world_size=1)
         self.seen.reset()
+        if self.ranked is not None:
+            self.ranked.reset()
         # (step, set version) whose rows the pruned slab holds; None after a sampled build overwrote the
         # shared candidates / vocab_pos / prefix_pos buffers (warmup interleaves the two kinds of step).
         self.pruned_loaded: tuple[int, int] | None = None
 
     def set_prefix_table(self, prefix_table: np.ndarray):
         self.prefix_table = prefix_table
+        self.prefix_table_d = torch.from_numpy(prefix_table).to(self.candidates.device)
+
+    def describe(self) -> str:
+        """The run's pruning setup, one log line."""
+        if not self.mass:
+            steps = sorted(self.pruned_steps & set(range(self.schedule.total_steps)))
+            return (f"mode=exact mass=0 width={PRUNED_WIDTH} on full-softmax steps {steps[0]}-{steps[-1]} "
+                    f"({len(steps)} steps); candidates = ids seen as training targets so far")
+        by_stage = {}
+        for s in range(self.schedule.total_steps):
+            by_stage.setdefault(_stage_index(self.schedule, s), []).append(self.counts[s])
+        widths = "; ".join(f"stage {i}: " + "/".join(map(str, dict.fromkeys(w))) for i, w in by_stage.items())
+        return (f"mode=ranked mass={self.mass} width={ranked_width(self.mass)} on every step ({widths}); "
+                f"candidates = microbatch targets + most frequent ids so far")
+
+    def summary(self) -> str:
+        """End-of-run counters (syncs): call off the clock."""
+        return self.ranked.summary() if self.ranked is not None else self.seen.summary()
 
     def count_change_steps(self) -> list[int]:
         return [s for s in range(1, len(self.counts)) if self.counts[s] != self.counts[s - 1]]
@@ -77,6 +106,8 @@ class PortableSampledSoftmax:
         right before the forward. `targets` is the device copy of targets_cpu (copied here if omitted)."""
         if targets is None:
             targets = targets_cpu.to(self.candidates.device)
+        if self.ranked is not None:
+            return self._prepare_ranked(step, targets, lm_head_f8_col)
         self.seen.mark(targets)
         if step in self.pruned_steps:
             return self._prepare_pruned(step, targets_cpu, targets, lm_head_f8_col)
@@ -117,4 +148,26 @@ class PortableSampledSoftmax:
             self.pruned_loaded = (step, self.seen.version)
         n = targets.shape[0]
         inputs.target_pos[:n].copy_(inputs.vocab_pos.index_select(0, targets))
+        return inputs
+
+    def _prepare_ranked(self, step: int, targets: Tensor, lm_head_f8_col: Tensor) -> SampledLoss:
+        """Ranked mode: the set, its row slab, and the target / prefix positions, all on the device."""
+        P = self.counts[step]
+        inputs = self.loss_inputs[P]
+        cand = self.candidates[:P]
+        cand.copy_(self.ranked.build(step, targets, P))
+        torch.index_select(lm_head_f8_col.T.view(torch.uint8), 0, cand, out=inputs.rows.view(torch.uint8))
+        transpose_copy(inputs.rows.view(torch.uint8), inputs.rows_t.view(torch.uint8))
+        inputs.vocab_pos.fill_(-1)
+        inputs.vocab_pos.index_copy_(0, cand, self.arange[:P])
+        n = targets.shape[0]
+        # Every target is a candidate (overflow is counted); the clamp only keeps an overflow in bounds.
+        inputs.target_pos[:n].copy_(inputs.vocab_pos.index_select(0, targets).clamp_(min=0))
+        if self.prefix_table_d is None:
+            inputs.prefix_pos[:n].fill_(-1)
+        else:
+            # As the record: a prefix target outside the set is dropped (-1, the kernel's no-op).
+            prefix = self.prefix_table_d.index_select(0, targets)
+            pos = inputs.vocab_pos.index_select(0, prefix.clamp(min=0))
+            inputs.prefix_pos[:n].copy_(torch.where(prefix >= 0, pos, -1))
         return inputs

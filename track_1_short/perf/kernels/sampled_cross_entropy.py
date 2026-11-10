@@ -25,7 +25,7 @@ from track_1_short.perf.kernels.cross_entropy import (
     compile_ce_kernel,
 )
 from track_1_short.portable import config as portable_config
-from track_1_short.portable.vocab_prune import PRUNED_WIDTH
+from track_1_short.portable.vocab_prune import PRUNED_WIDTH, ranked_width
 from track_1_short.sampled_softmax import ALL_CANDIDATE_COUNTS
 
 # The kernel's 8-wide shared-memory and grad stores need P % (BLOCK_SIZE * 8) == 0.
@@ -35,7 +35,11 @@ for _p in ALL_CANDIDATE_COUNTS:
 # experiment/vocab-prune (one GPU only): the pruned full-softmax width. Like the full 50304 it is a
 # multiple of 128, not of 2048: the kernel's tail guard (i < NUM_FULL_LOADS || idx < VOCAB_SIZE) covers
 # the last partial vector pass, as it does at 50304, and 8-wide stores stay aligned (P % 8 == 0).
-CE_WIDTHS = (*ALL_CANDIDATE_COUNTS, PRUNED_WIDTH) if portable_config.PORTABLE else ALL_CANDIDATE_COUNTS
+# Ranked pruning (RTX_VOCAB_PRUNE_MASS > 0) adds its width; every width is a multiple of 128.
+CE_WIDTHS = ALL_CANDIDATE_COUNTS
+if portable_config.PORTABLE:
+    _ranked = {ranked_width(portable_config.VOCAB_PRUNE_MASS)} if portable_config.VOCAB_PRUNE_MASS else set()
+    CE_WIDTHS = tuple(sorted({*ALL_CANDIDATE_COUNTS, PRUNED_WIDTH} | _ranked))
 SAMPLED_CE_KERNELS = {p: compile_ce_kernel(p) for p in CE_WIDTHS}
 
 

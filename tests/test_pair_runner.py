@@ -172,6 +172,26 @@ class PairedRunTests(unittest.TestCase):
         self.assertEqual(result["seconds_delta"], -5)
         self.assertAlmostEqual(result["time_change_percent"], -100 * 5 / 825)
 
+    def test_candidate_env_reaches_only_the_gate_and_candidate(self):
+        seen = []
+        state = {"branch": EXPERIMENT}
+
+        def run(command, **kwargs):
+            if command[0] == "bash" or command[1] != pair.UPLOADER:
+                seen.append((state["branch"], command[2] if command[0] != "bash" else "train",
+                             kwargs["env"].get("RTX_VOCAB_PRUNE_MASS")))
+            if command[0] == "bash":
+                raise subprocess.CalledProcessError(1, command)  # stop after the first arm
+
+        with patch.object(pair, "git", fake_git(state)), patch.object(pair.subprocess, "run", run),                 patch.object(sys, "argv", ["pair", "--candidate-env", "RTX_VOCAB_PRUNE_MASS=0.05"]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                pair.main()
+        self.assertEqual(seen, [(EXPERIMENT, "tests/check_rtx5090.py", "0.05"), ("baseline", "train", None)])
+        for bad in ("MASS=0.05", "RTX_X"):
+            with self.subTest(bad=bad), patch.object(sys, "argv", ["pair", "--candidate-env", bad]):
+                with self.assertRaises(SystemExit):
+                    pair.main()
+
     def test_gate_failure_prevents_training(self):
         state = {"branch": EXPERIMENT}
 
