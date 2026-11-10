@@ -9,7 +9,9 @@ tokens[:-1]. Validation targets are the first val_tokens + 1 tokens of the first
 first (validation_batches). The replay uses the full BOS index; the loader's partial first-6M-token
 index is a prefix of it, so the slices are identical.
 
-Validation counts measure the risk of a train-derived choice only; never pick tokens from them.
+It also records each microbatch's number of distinct targets, per stage: the floor of any candidate
+width, since every target must be a candidate. Validation counts measure the risk of a train-derived
+choice only; never pick tokens from them.
 
 CPU only: numpy, plus torch for the schedule; no GPU and no training. Writes
 logs/token-census/<UTC>/counts.npz and summary.json; prints CENSUS_COMPLETE.
@@ -38,7 +40,7 @@ REAL_VOCAB = 50257       # GPT-2 ids; the model pads to 50304, the padding ids n
 PADDED_VOCAB = 50304
 FULL_SOFTMAX_START = 1107  # sampled_softmax.py: steps 0-1106 train on 10240-24576 candidates
 THRESHOLDS = (1, 10, 100, 1000)
-COVERAGE = (0.99, 0.999, 0.9999, 0.99999)
+COVERAGE = (0.7, 0.8, 0.85, 0.9, 0.93, 0.95, 0.98, 0.99, 0.999, 0.9999, 0.99999)
 
 
 def read_shard(path):
@@ -79,9 +81,15 @@ class ShardCursor:
         return out
 
 
+def stage_index(schedule, step):
+    return next(i for i, (_, end) in enumerate(schedule.boundaries) if step < end)
+
+
 def replay_training(files, schedule, microbatch_tokens, steps=None):
-    """Per-id counts of the training targets and inputs; targets also split at FULL_SOFTMAX_START."""
+    """Per-id counts of the training targets and inputs (targets also split at FULL_SOFTMAX_START), and
+    per stage index the list of each microbatch's distinct-target count."""
     counts = {k: np.zeros(PADDED_VOCAB, np.int64) for k in ("targets", "inputs", "targets_full_softmax")}
+    distinct, mark = {}, np.zeros(PADDED_VOCAB, dtype=bool)
     file_iter = iter(files)
     cursor, shards = ShardCursor(read_shard(next(file_iter))), 1
     for step in range(schedule.total_steps if steps is None else steps):
@@ -98,15 +106,25 @@ def replay_training(files, schedule, microbatch_tokens, steps=None):
                     raise RuntimeError(f"out of training data at step {step}") from None
                 cursor, shards = ShardCursor(read_shard(path)), shards + 1
         tok = cursor.tokens
-        seen = np.bincount(np.concatenate([tok[s:e] for st, en in slices for s, e in zip(st, en)]),
-                           minlength=PADDED_VOCAB)
+        buffers = [np.concatenate([tok[s:e] for s, e in zip(st, en)]) for st, en in slices]
+        for buf in buffers:
+            mark[buf[1:]] = True
+            distinct.setdefault(stage_index(schedule, step), []).append(int(np.count_nonzero(mark)))
+            mark[buf[1:]] = False
+        seen = np.bincount(np.concatenate(buffers), minlength=PADDED_VOCAB)
         first = np.bincount(tok[[st[0] for st, _ in slices]], minlength=PADDED_VOCAB)
         last = np.bincount(tok[[en[-1] - 1 for _, en in slices]], minlength=PADDED_VOCAB)
         counts["targets"] += seen - first
         counts["inputs"] += seen - last
         if step >= FULL_SOFTMAX_START:
             counts["targets_full_softmax"] += seen - first
-    return counts, shards
+    return counts, shards, distinct
+
+
+def distinct_summary(distinct):
+    return {str(stage): dict(microbatches=len(v), mean=round(float(np.mean(v)), 1),
+                             p99=int(np.percentile(v, 99)), max=int(max(v)))
+            for stage, v in sorted(distinct.items())}
 
 
 def count_validation(files, val_tokens):
@@ -168,7 +186,7 @@ def main():
     if not train_files or not val_files:
         raise SystemExit(f"no shards at {args.train_files} / {args.val_files} (set DATA_PATH?)")
     print(f"Replaying {schedule.total_steps} steps at {cli.microbatch_tokens} tokens per microbatch...", flush=True)
-    counts, shards = replay_training(train_files, schedule, cli.microbatch_tokens)
+    counts, shards, distinct = replay_training(train_files, schedule, cli.microbatch_tokens)
     expected = sum(schedule.lookup(s)[0].batch_size for s in range(schedule.total_steps))
     assert counts["targets"].sum() == expected, (counts["targets"].sum(), expected)
     val_targets, val_inputs = count_validation(val_files, args.val_tokens)
@@ -176,7 +194,8 @@ def main():
     summary.update(steps=schedule.total_steps, microbatch_tokens=cli.microbatch_tokens, train_shards_read=shards,
                    full_softmax_target_tokens=int(counts["targets_full_softmax"].sum()),
                    distinct_full_softmax_targets=int((counts["targets_full_softmax"] > 0).sum()),
-                   never_seen_as_input=int((counts["inputs"][:REAL_VOCAB] == 0).sum()))
+                   never_seen_as_input=int((counts["inputs"][:REAL_VOCAB] == 0).sum()),
+                   distinct_targets_per_microbatch=distinct_summary(distinct))
     out = cli.out or ROOT / "logs" / "token-census" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out.mkdir(parents=True, exist_ok=False)
     np.savez_compressed(out / "counts.npz", train_targets=counts["targets"], train_inputs=counts["inputs"],
@@ -199,6 +218,9 @@ def report(summary):
         "Ids covering the training targets: "
         + ", ".join(f"{float(q) * 100:g}% -> {k:,}" for q, k in summary["ids_for_train_coverage"].items()),
     ]
+    lines.append(f"Distinct targets per {summary['microbatch_tokens']:,}-token microbatch, by stage: " + "; ".join(
+        f"{stage}: mean {d['mean']:,.0f}, p99 {d['p99']:,}, max {d['max']:,}"
+        for stage, d in summary["distinct_targets_per_microbatch"].items()))
     for c in THRESHOLDS:
         x = summary["rare"][f"train_count_below_{c}"]
         lines.append(f"Train count < {c:>4}: {x['ids']:>6,} ids (keep {x['kept_vocab']:,}), "

@@ -49,7 +49,12 @@
   every microbatch marks its targets seen (GPU); steps 1107-1193 run the sampled CE kernels over a
   fixed 50,048-wide set = ids seen as targets so far + never-seen fill (exact for every target; C is
   rebuilt if a new id appears; full-softmax fallback if > 50,048 seen). Logs VOCAB_PRUNE lines.
-  Prediction: time -0.1..+0.2 s, loss within noise. PAIR PENDING (user runs it). docs/vocab-prune.md.
+  Prediction: time -0.1..+0.2 s, loss within noise. Pair not run yet; it is the 0% point of the sweep.
+- NEXT (user, 2026-11-10): sweep RTX_VOCAB_PRUNE_MASS (share of training text whose tokens may leave
+  the softmax) over ALL steps: candidates = every microbatch target + most frequent ids seen so far,
+  at narrower widths than 10,240-24,576 (sampled steps hold ~13-65 s of output-layer time). Validation
+  untouched; no fallback needed (targets stay exact). Waiting on census rerun: per-stage distinct
+  targets per microbatch (width floor) and 70-98% coverage (mass -> width). Not implemented yet.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a

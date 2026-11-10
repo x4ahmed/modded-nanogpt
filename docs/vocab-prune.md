@@ -128,6 +128,15 @@ also compiles and runs the pruned steps during warmup; then baseline, then candi
 `baseline-for-vocab-prune-1gpu-seed-999` and `vocab-prune-1gpu-seed-999`). CPU tests:
 `tests/test_vocab_prune.py` (set exactness, rebuilds, fallback, warmup interleaving, schedule).
 
+## Next: frequency-ranked pruning sweep over all steps (planned)
+
+User plan (2026-11-10): a per-run knob, the share of training text whose tokens may be pruned, applied
+to every step. Candidates per microbatch = all its targets (exact loss) + the most frequent ids seen so
+far in this run, at fixed widths below the record's 10,240 / 14,336 / 24,576 and 50,304. Validation is
+untouched. Steps 0-1106 carry ~13 s (measured rate) to ~65 s (FLOP bound) of output-layer time, so a
+sweet spot is plausible. Widths need two census numbers, now reported by tools/token_census.py:
+distinct targets per microbatch by stage (the floor) and ids covering 70-98% of training text.
+
 ## Options considered before the census
 
 - Fewer than ~5,000 removable ids (train count 0, validation hits ~0): the time gain is below pair noise.

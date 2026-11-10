@@ -44,6 +44,7 @@ def write_shard(path, tokens, magic=census.MAGIC):
 class FakeSchedule:
     def __init__(self, stages):
         self.stages, self.total_steps = stages, len(stages)
+        self.boundaries = [(0, len(stages))]  # one stage
 
     def lookup(self, step):
         batch_size, max_seq_len = self.stages[step]
@@ -83,11 +84,12 @@ class CensusTests(unittest.TestCase):
             census_stop = census.FULL_SOFTMAX_START
             census.FULL_SOFTMAX_START = 5
             try:
-                counts, shards = census.replay_training(files, FakeSchedule(stages), 512)
+                counts, shards, distinct = census.replay_training(files, FakeSchedule(stages), 512)
             finally:
                 census.FULL_SOFTMAX_START = census_stop
             # Brute force: the same slices, concatenated per microbatch, shifted by one.
             targets, inputs, late = (np.zeros(census.PADDED_VOCAB, np.int64) for _ in range(3))
+            want_distinct = []
             it = iter(files)
             cursor = census.ShardCursor(census.read_shard(next(it)))
             for step, (batch, seq) in enumerate(stages):
@@ -101,6 +103,7 @@ class CensusTests(unittest.TestCase):
                     buf = np.concatenate([cursor.tokens[s:e] for s, e in zip(st, en)])
                     self.assertEqual(buf.size, 513)
                     targets += np.bincount(buf[1:], minlength=census.PADDED_VOCAB)
+                    want_distinct.append(np.unique(buf[1:]).size)
                     inputs += np.bincount(buf[:-1], minlength=census.PADDED_VOCAB)
                     if step >= 5:
                         late += np.bincount(buf[1:], minlength=census.PADDED_VOCAB)
@@ -109,6 +112,9 @@ class CensusTests(unittest.TestCase):
         np.testing.assert_array_equal(counts["inputs"], inputs)
         np.testing.assert_array_equal(counts["targets_full_softmax"], late)
         self.assertEqual(counts["targets"].sum(), sum(b for b, _ in stages))
+        self.assertEqual(distinct, {0: want_distinct})
+        summary = census.distinct_summary(distinct)["0"]
+        self.assertEqual((summary["max"], summary["microbatches"]), (max(want_distinct), len(want_distinct)))
 
     def test_out_of_data_and_bad_shards_fail_loudly(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -145,7 +151,8 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(s["rare"]["train_count_below_10"]["ids"], census.REAL_VOCAB - 3)
         self.assertEqual(s["rare"]["train_count_below_10"]["val_tokens_hit"], 6)
         # cumulative shares 0.9001, 0.9901, 0.9991, 1.0
-        self.assertEqual(s["ids_for_train_coverage"], {"0.99": 2, "0.999": 3, "0.9999": 4, "0.99999": 4})
+        self.assertEqual({q: s["ids_for_train_coverage"][q] for q in ("0.9", "0.99", "0.999", "0.9999", "0.99999")},
+                         {"0.9": 1, "0.99": 2, "0.999": 3, "0.9999": 4, "0.99999": 4})
         self.assertEqual([e["id"] for e in s["never_seen_but_in_val"]], [7, 9])
         train[census.REAL_VOCAB] = 1
         with self.assertRaises(AssertionError):
