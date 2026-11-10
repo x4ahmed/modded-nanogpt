@@ -71,12 +71,21 @@ Experiment 1's five seeds ran before the pairing rule. Its seed-999 rerun is pai
 | Pair (seed 999) | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
 | --- | --- | --- | --- | --- |
 | Zero init (Experiment 1 rerun), 2026-11-08 | 3.295493 / 862.153 | 3.332404 / 952.489 | +0.036911 | +90.336 s (+10.48%) |
-| Last-source init (this branch) | pending | pending | | |
+| Last-source init (this branch), 2026-11-10 | 3.294893 / 863.494 | 3.327843 / 960.098 | +0.032950 | +96.604 s (+11.19%) |
 
 Zero-init pair (user-supplied, one tujestpolin allocation, smoke check first): baseline log
 `logs/run-20261108T214316Z-1910059.console.txt`, candidate `logs/run-20261108T220007Z-1912665.console.txt`
 (`ROUTING variant=block_attnres block_size=6 inject=1`). Both 1194/1194 updates, memory PASS (peak
 allocated 19.99 GiB each; headroom 5.81 / 6.24 GiB). It reproduces Experiment 1's five-seed regression
-(+0.0359, +10.1%): the zero-init AttnRes loss is stable across sessions. Last-source pair not run yet.
+(+0.0359, +10.1%): the zero-init AttnRes loss is stable across sessions.
+
+Last-source pair (`logs/pairs/20261110T185526Z/seed-999.json`, candidate 8fdfadd, smoke check passed):
+baseline `logs/run-20261110T185526Z-31500.console.txt`, candidate `logs/run-20261110T191212Z-33966.console.txt`
+(`ROUTING ... last_init=0.9`). Both 1194/1194, memory PASS (19.99 GiB each), both W&B uploads succeeded.
+Verdict: still far worse than baseline (+0.0330 loss, +11.2% time), so STOP; no five-seed expansion.
+Its loss gap is ~0.004 smaller than zero init's (+0.0369), a one-seed difference across two pairs, so
+the init explains at most a small part of the regression. The ~10% slowdown is the block AttnRes
+routing itself (the bias adds one scalar per mix). The remaining gap likely comes from what block mode
+removes (MUDD routing, residual scaling, shared late attention input), which no init restores.
 CPU tests cover the bias math, gradients, compile, per-site wiring, registration,
 config, launcher names and the pair runner; they are not GPU validation.

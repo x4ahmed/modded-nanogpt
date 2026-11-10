@@ -37,9 +37,11 @@
 - Bias optimizer: replicated Adam with mudd_b2 settings (LR x0.25, betas 0.9/0.99, no WD). Created by
   torch.full (no RNG draws); warmup reset restores it; not tail-averaged. Site 0 (one source) ignores it.
 - Log line: ROUTING variant=block_attnres block_size=6 inject=1 last_init=0.9; uploader records it.
-- Status 2026-11-08: implemented; 48 CPU tests pass. GPU smoke and the seed-999 pair NOT run yet.
-  Target to beat: its own paired baseline by > 0.002; zero init lost by 0.0369 in its pair.
-  First pair attempt (2026-11-08) died with a frozen SSH terminal; rerun inside tmux on the login node.
+- RESULT 2026-11-10 (seed-999 pair, 8fdfadd, smoke pass): baseline 3.294893 / 863.494 s, last-init
+  3.327843 / 960.098 s: +0.032950 loss, +11.19% time. STOPPED, no five-seed expansion. Only ~0.004
+  better than zero init's +0.0369 (one seed, separate pairs): init is not the main cause of the
+  AttnRes regression; block mode's removed MUDD/residual pieces likely are. docs/attnres-last-init.md.
+- Run long jobs inside tmux on the login node (an earlier attempt died with a frozen SSH terminal).
 
 ## Commands
 - Pair: python -u tools/run_pair.py --seeds 999 (clean checkout of this branch; full command block in
