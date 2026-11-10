@@ -38,7 +38,7 @@
   torch.full (no RNG draws); warmup reset restores it; not tail-averaged. Site 0 (one source) ignores it.
 - Log line: ROUTING variant=block_attnres block_size=6 inject=1 last_init=0.9; uploader records it.
 - RESULT 2026-11-10 (seed-999 pair, 8fdfadd, smoke pass): baseline 3.294893 / 863.494 s, last-init
-  3.327843 / 960.098 s: +0.032950 loss, +11.19% time. STOPPED, no five-seed expansion. Only ~0.004
+  3.327843 / 960.098 s: +0.032950 loss, +11.19% time. Misses the > 0.002 bar for more seeds; continuing is the user's call (not stopped). Only ~0.004
   better than zero init's +0.0369 (one seed, separate pairs): init is not the main cause of the
   AttnRes regression; block mode's removed MUDD/residual pieces likely are. docs/attnres-last-init.md.
 - Run long jobs inside tmux on the login node (an earlier attempt died with a frozen SSH terminal).

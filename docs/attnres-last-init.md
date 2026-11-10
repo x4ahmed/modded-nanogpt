@@ -82,7 +82,8 @@ allocated 19.99 GiB each; headroom 5.81 / 6.24 GiB). It reproduces Experiment 1'
 Last-source pair (`logs/pairs/20261110T185526Z/seed-999.json`, candidate 8fdfadd, smoke check passed):
 baseline `logs/run-20261110T185526Z-31500.console.txt`, candidate `logs/run-20261110T191212Z-33966.console.txt`
 (`ROUTING ... last_init=0.9`). Both 1194/1194, memory PASS (19.99 GiB each), both W&B uploads succeeded.
-Verdict: still far worse than baseline (+0.0330 loss, +11.2% time), so STOP; no five-seed expansion.
+Verdict: still far worse than baseline (+0.0330 loss, +11.2% time); it misses the > 0.002 bar for
+more seeds. Whether to continue is the user's decision.
 Its loss gap is ~0.004 smaller than zero init's (+0.0369), a one-seed difference across two pairs, so
 the init explains at most a small part of the regression. The ~10% slowdown is the block AttnRes
 routing itself (the bias adds one scalar per mix). The remaining gap likely comes from what block mode
