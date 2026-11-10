@@ -2,7 +2,8 @@
 
 Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). Idea (Notion, 2026-11-05):
 check how often each token appears in the training data and drop the tokens that are not needed.
-Status: analysis. The training code is the baseline's, unchanged; only the census tool is new.
+Status: census done 2026-11-10 (results below). The training code is the baseline's, unchanged; only
+the census tool is new.
 
 ## Where the vocabulary still costs time
 
@@ -54,10 +55,41 @@ tokens fall on them), then `CENSUS_COMPLETE dir=logs/token-census/<UTC>`. The fo
 `counts.npz` (per-id counts) and `summary.json`. CPU tests: `tests/test_token_census.py` (slicing
 identical to the record's `Shard` on synthetic shards, counts against brute force, schedule totals).
 
-## Decision after the census
+## Census result (2026-11-10)
+
+Cluster folder `logs/token-census/20261110T214058Z`: 328,663,040 training targets, 1194 steps, 5 shards.
+
+| Ids dropped (train count) | Ids | Kept | Share of training targets | Validation tokens on them | Time saved (anchor - FLOP bound) |
+| --- | --- | --- | --- | --- | --- |
+| 0 (never seen) | 268 | 49,989 | 0 | 1 (` oun`, id 16103) | 0.02 - 0.10 s |
+| < 10 | 587 | 49,670 | 4.5e-6 | 68 (43 ids) | 0.04 - 0.22 s |
+| < 100 | 2,337 | 47,920 | 2.9e-4 | 3,580 (1,188 ids) | 0.17 - 0.88 s |
+| < 1000 | 26,841 | 23,416 | 3.8% | 421,761 (25,537 ids) | 1.9 - 9.7 s, only as a two-level softmax |
+
+36,968 ids cover 99% of the training targets, 46,223 cover 99.9%, 48,696 99.99%, 49,530 99.999%;
+49,510 ids occur even within the 24.6M tokens of the full-softmax steps. The 268 never-seen ids (the
+same 268 never occur as inputs) are mostly byte tokens that cannot occur in valid UTF-8 (0xC0, 0xC1,
+0xF5-0xFF) and control characters (0x00-0x0C), plus a few such as `{` (id 90).
+
+- Exact pruning removes 315 never-target columns (with the 47 padding ids): the full-softmax width
+  drops from 50,304 to 50,048 at 128-column alignment (through the sampled path's 2048 alignment it
+  would grow to 51,200). At most ~0.1 s, far below pair noise.
+- Dropping seen-but-rare ids needs a fallback probability: hard-masking the < 10 set alone would add
+  ~5e-4 loss through its 68 validation tokens. Up to count < 100 it still saves under 1 s.
+- Only a two-level output (a frequent head of ~23.4K ids plus a rare-token cluster scored on the 3.8%
+  of tokens that need it) cuts enough width: 1.9 s (measured anchor) to 9.7 s (FLOP bound), 0.2-1.1%.
+  It replaces the flat softmax for the whole run (the sampled steps train no rare cluster), needs new
+  fused fp8 CE kernels and canonical-mask handling, and usually costs some loss, which extra steps
+  would have to buy back.
+- Option B below (eval-time mask of the 268 ids) would remove only floor-level mass and put one
+  validation token at ~80 nats.
+
+No measurable time lever was found; no pair has been run. Closing or continuing is the user's call.
+
+## Options considered before the census
 
 - Fewer than ~5,000 removable ids (train count 0, validation hits ~0): the time gain is below pair noise.
-  Close the idea and record the numbers.
+  This is the measured case (268 ids, one validation hit).
 - More: two candidates, each its own paired run (`tools/run_pair.py` from `experiment/attnres-last-init`):
   - A. Pruned output in the full-softmax steps: run steps 1107-1193 through the sampled-softmax path
     with a fixed candidate set = ids seen as training targets so far (every target is in it by

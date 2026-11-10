@@ -38,13 +38,14 @@
   same-allocation time noise ~1-2 s.
 - Out of scope: retokenizing (changes the metric); choosing ids from validation counts (peeking).
   A removed id must keep finite probability: a validation token on it costs ~80 nats under -60 masking.
-- NOW: census pending (user runs it). tools/token_census.py replays the exact one-GPU training stream
-  (loader slicing, stage document cuts, 16,384-token microbatches; 328,663,040 targets) and counts
-  every id as target/input, plus validation targets (risk measurement only). CPU only, no GPU.
-- After the census: < ~5,000 removable ids (train count 0, ~0 validation hits) means the gain is
-  below pair noise; report that. Otherwise options A (pruned output in the full-softmax steps via the
-  sampled path, fixed seen-id set) or B (eval-time mask of never-seen ids, measured exactly inside one
-  run) in docs/vocab-prune.md, each paired.
+- CENSUS DONE 2026-11-10 (cluster logs/token-census/20261110T214058Z; tools/token_census.py replays
+  the exact 328,663,040 training targets, CPU only): 49,989 of 50,257 ids occur; 268 never (mostly
+  invalid-UTF-8 byte and control-char tokens), 1 validation token on them. Train counts < 10 / 100 /
+  1000: 587 / 2,337 / 26,841 ids; validation hits 68 / 3,580 / 421,761. 99% coverage: 36,968 ids.
+- Reading: exact pruning saves <= 0.1 s (width 50,304 -> 50,048), far below pair noise; rarer cuts
+  need a fallback probability and stay < 1 s up to count < 100; only a whole-run two-level softmax
+  (head ~23.4K ids) reaches 1.9-9.7 s (0.2-1.1%), with new CE kernels and likely loss cost.
+  No pair run. Closing or continuing is the user's call; details in docs/vocab-prune.md.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
@@ -75,7 +76,8 @@
   kept on its own branch). Gram NS: little total-run potential.
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
-- Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done above), vocabulary pruning (this), mHC.
+- Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done above), vocabulary pruning (this branch;
+  census shows no measurable time lever), mHC (not started).
   Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 = the AttnRes pairs.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
