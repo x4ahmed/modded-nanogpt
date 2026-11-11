@@ -290,6 +290,13 @@ Log: `VOCAB_PRUNE mode=stratified ... exact_end=1: full softmax on steps 1107-11
 | Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
 | --- | --- | --- | --- | --- |
 | m 0.20, t 1024, exact end | 3.295625 / 847.191 | 3.319397 / 794.359 | +0.0238 | -52.8 s (-6.24%) |
+| m 0.20, t 2048, exact end (2026-11-12) | 3.295598 / 833.623 | 3.304879 / 795.297 | +0.0093 | -38.3 s (-4.60%) |
+
+Tail 2,048 (width 8,192) cuts the gap by 61% (+0.0238 -> +0.0093): sampling noise on steps 0-1106 is the
+main cause. The candidate itself costs only ~1 s more (795.3 vs 794.4 s); most of the smaller % saving is
+this pair's faster baseline (833.6 vs 847.2 s, session drift). ~0.0020 loss per 1% time; still 4.6x the
+0.002 bar. If the gap scales ~1/t, t = 4,096 (width 10,240 = the record's stage-1 width) lands near
++0.005; stages 2-4 (14,336 / 24,576) are then the only narrowing.
 
 Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
 1.7% of time (~15 s, the high end of the 3-16 s estimate). It matches m = 0.10's loss (+0.0240) while
