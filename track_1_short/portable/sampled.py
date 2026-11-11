@@ -14,7 +14,8 @@ class is visited uniformly, which is what the staggering is for.
 experiment/vocab-prune (portable/vocab_prune.py): with pruning mass 0 the record's full-softmax steps
 run at width PRUNED_WIDTH over the ids seen as training targets so far; with mass m > 0 every step runs
 at min(record width, ranked_width(m)) over the microbatch's targets plus the most frequent ids so far,
-built on the device (no host builder, no upload).
+built on the device (no host builder, no upload). RTX_VOCAB_PRUNE_EXACT_END=1 keeps the record's
+full softmax on its full-softmax steps (prepare returns None there).
 """
 import numpy as np
 import torch
@@ -31,14 +32,16 @@ from track_1_short.schedule import TrainingSchedule
 
 class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
-                 device: torch.device, mass: float | None = None, tail: int | None = None):
+                 device: torch.device, mass: float | None = None, tail: int | None = None,
+                 exact_end: bool | None = None):
         self.schedule = schedule
         self.mass = rtx.VOCAB_PRUNE_MASS if mass is None else mass
         self.tail = (rtx.VOCAB_PRUNE_TAIL if tail is None else tail) if self.mass else 0
+        self.exact_end = bool(rtx.VOCAB_PRUNE_EXACT_END if exact_end is None else exact_end) and bool(self.mass)
         record_counts = [candidate_count_at(schedule, s) for s in range(schedule.total_steps + 1)]
         # Exact mode: the record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
         self.pruned_steps = frozenset(s for s, count in enumerate(record_counts) if not count)
-        self.counts = (ranked_counts(record_counts, self.mass, vocab_size, self.tail) if self.mass
+        self.counts = (ranked_counts(record_counts, self.mass, vocab_size, self.tail, self.exact_end) if self.mass
                        else pruned_counts(record_counts))
         p_values = sorted(set(self.counts) - {0})
         assert p_values
@@ -86,11 +89,15 @@ class PortableSampledSoftmax:
         for s in range(self.schedule.total_steps):
             by_stage.setdefault(_stage_index(self.schedule, s), []).append(self.counts[s])
         widths = "; ".join(f"stage {i}: " + "/".join(map(str, dict.fromkeys(w))) for i, w in by_stage.items())
+        where = "on every step"
+        if self.exact_end:
+            full = sorted(self.pruned_steps & set(range(self.schedule.total_steps)))
+            where = f"on sampled steps, exact_end=1: full softmax on steps {full[0]}-{full[-1]} ({len(full)} steps)"
         if self.tail:
             return (f"mode=stratified mass={self.mass} tail={self.tail} width={ranked_width(self.mass) + self.tail} "
-                    f"on every step ({widths}); candidates = microbatch targets + most frequent ids so far + "
+                    f"{where} ({widths}); candidates = microbatch targets + most frequent ids so far + "
                     f"{self.tail} uniform tail ids weighted rest/{self.tail}")
-        return (f"mode=ranked mass={self.mass} width={ranked_width(self.mass)} on every step ({widths}); "
+        return (f"mode=ranked mass={self.mass} width={ranked_width(self.mass)} {where} ({widths}); "
                 f"candidates = microbatch targets + most frequent ids so far")
 
     def summary(self) -> str:
@@ -113,6 +120,8 @@ class PortableSampledSoftmax:
         if targets is None:
             targets = targets_cpu.to(self.candidates.device)
         if self.ranked is not None:
+            if not self.counts[step]:
+                return None  # exact_end: the record's full softmax on this step
             return self._prepare_ranked(step, targets, lm_head_f8_col)
         self.seen.mark(targets)
         if step in self.pruned_steps:

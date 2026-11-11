@@ -313,5 +313,41 @@ class StratifiedModeTests(unittest.TestCase):
                 sys.modules[name] = original
 
 
+class ExactEndTests(unittest.TestCase):
+    def test_exact_end_keeps_the_record_full_softmax_steps(self):
+        self.assertEqual(ranked_counts([10240, 24576, 0], 0.20, VOCAB, 1024, exact_end=True), [7168, 7168, 0])
+        sampled = import_portable_sampled()
+        record = [sampled.candidate_count_at(schedule(), s) for s in range(1195)]
+        s = sampled.PortableSampledSoftmax(schedule(), VOCAB, 16, 512, "cpu", mass=0.20, tail=1024, exact_end=True)
+        full = [i for i, c in enumerate(record) if not c]
+        self.assertTrue(full)
+        self.assertEqual([i for i, c in enumerate(s.counts) if not c], full)
+        self.assertEqual({c for c in s.counts if c}, {7168})
+        self.assertIn("exact_end=1: full softmax on steps 1107-1193 (87 steps)", s.describe())
+        lm = torch.empty_strided((16, VOCAB), (1, 16), dtype=torch.float8_e4m3fn)
+        lm.T.copy_(torch.randn(VOCAB, 16).clamp(-4, 4).to(torch.float8_e4m3fn))
+        targets = torch.randint(0, 50_257, (512,))
+        self.assertIsNone(s.prepare(1150, targets, lm))
+        self.assertIsNotNone(s.prepare(700, targets, lm).col_logw)
+
+    def test_config_needs_a_mass(self):
+        name = "track_1_short.portable.config"
+        original = importlib.import_module(name)  # loaded under the clean env, restored below
+
+        def fresh():
+            sys.modules.pop(name, None)
+            return importlib.import_module(name)
+
+        try:
+            with patch.dict(os.environ, RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_EXACT_END="1"):
+                self.assertTrue(fresh().VOCAB_PRUNE_EXACT_END)
+            for env in (dict(RTX_VOCAB_PRUNE_EXACT_END="1"), dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_EXACT_END="yes")):
+                with self.subTest(env=env), patch.dict(os.environ, env), self.assertRaises(AssertionError):
+                    fresh()
+        finally:
+            sys.modules[name] = original
+            sys.modules["track_1_short.portable"].config = original  # `from ... import config` reads this
+
+
 if __name__ == "__main__":
     unittest.main()

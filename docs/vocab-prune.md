@@ -262,8 +262,28 @@ nearly linear: ~0.0044-0.0050 loss per 1% time at all three masses, so no mass i
 m = 0.10 keeps the record's width in stage 1 and still loses +0.024, so narrowing alone does not explain
 the damage. Suspects: the last 87 steps are no longer exact (record_late: even P = 24,576 there cost
 +0.0064), and the estimator's noise and low bias of log Z (1,024 draws at weight ~42).
-Candidate next tests (user's call): an exact ending (full softmax on steps 1107-1193 in stratified mode),
-or a larger tail (2,048).
+Candidate next tests: an exact ending (full softmax on steps 1107-1193 in stratified mode), or a larger
+tail (2,048). The user chose the exact ending (2026-11-11).
+
+## Exact ending (2026-11-11, implemented, not yet run)
+
+`RTX_VOCAB_PRUNE_EXACT_END=1` (needs a mass): the record's full-softmax steps 1107-1193 (87 steps, 24.6M
+tokens) keep the record's full softmax (`prepare` returns None, the record's own path); the sampled steps
+stay stratified. Tests whether the inexact ending causes the loss gap. Estimated cost against plain
+m = 0.20: 43,136 extra columns x 24.6M tokens = 3-16 s, so roughly -6.1% to -7.6% instead of -7.95%.
+
+```bash
+source ~/venvs/nanogpt/bin/activate
+cd ~/speed-run/modded-nanogpt
+git fetch origin
+git switch experiment/vocab-prune
+git pull --ff-only origin experiment/vocab-prune
+python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t1024-xe \
+  --candidate-env RTX_VOCAB_PRUNE_MASS=0.20 --candidate-env RTX_VOCAB_PRUNE_TAIL=1024 \
+  --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1
+```
+
+Log: `VOCAB_PRUNE mode=stratified ... exact_end=1: full softmax on steps 1107-1193 (87 steps)`.
 
 ## Options considered before the census
 

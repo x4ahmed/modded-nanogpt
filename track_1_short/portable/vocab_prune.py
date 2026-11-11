@@ -61,11 +61,12 @@ def ranked_width(mass: float) -> int:
     return max(MIN_RANKED_WIDTH, -(-kept // 128) * 128)
 
 
-def ranked_counts(record_counts: list[int], mass: float, vocab_size: int, tail: int = 0) -> list[int]:
+def ranked_counts(record_counts: list[int], mass: float, vocab_size: int, tail: int = 0,
+                  exact_end: bool = False) -> list[int]:
     """Per-step widths in ranked mode: the record's width (full softmax = vocab_size), capped at the
-    mass's exact width plus the tail."""
+    mass's exact width plus the tail. exact_end keeps the record's full-softmax steps (count 0) as they are."""
     width = ranked_width(mass) + tail
-    return [min(count or vocab_size, width) for count in record_counts]
+    return [0 if exact_end and not count else min(count or vocab_size, width) for count in record_counts]
 
 
 def ranked_widths_in_use(record_widths, mass: float, tail: int, vocab_size: int) -> tuple[int, ...]:
