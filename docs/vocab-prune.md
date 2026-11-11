@@ -265,7 +265,7 @@ the damage. Suspects: the last 87 steps are no longer exact (record_late: even P
 Candidate next tests: an exact ending (full softmax on steps 1107-1193 in stratified mode), or a larger
 tail (2,048). The user chose the exact ending (2026-11-11).
 
-## Exact ending (2026-11-11, implemented, not yet run)
+## Exact ending (2026-11-11; result at the end)
 
 `RTX_VOCAB_PRUNE_EXACT_END=1` (needs a mass): the record's full-softmax steps 1107-1193 (87 steps, 24.6M
 tokens) keep the record's full softmax (`prepare` returns None, the record's own path); the sampled steps
@@ -284,6 +284,18 @@ python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t1024-xe \
 ```
 
 Log: `VOCAB_PRUNE mode=stratified ... exact_end=1: full softmax on steps 1107-1193 (87 steps)`.
+
+### Exact-ending result (seed 999, commit 2411e4a)
+
+| Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| m 0.20, t 1024, exact end | 3.295625 / 847.191 | 3.319397 / 794.359 | +0.0238 | -52.8 s (-6.24%) |
+
+Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
+1.7% of time (~15 s, the high end of the 3-16 s estimate). It matches m = 0.10's loss (+0.0240) while
+saving more time (-6.24% vs -5.40%): ~0.0038 loss per 1% time, against ~0.005 before. Still 12x the
+0.002 bar. The remaining +0.024 comes from the sampled steps 0-1106 (estimator noise / low log Z bias,
+narrow width).
 
 ## Options considered before the census
 
