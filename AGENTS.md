@@ -51,6 +51,7 @@
   at 2bf3d65 (loss / time): m=0.20 +0.0386 / -7.95%; 0.15 +0.0340 / -6.79%; 0.10 +0.0240 / -5.40%.
   All 12-19x the bar; ~0.005 loss per 1% time. EXACT END (RTX_VOCAB_PRUNE_EXACT_END=1, full softmax on
   1107-1193, 2411e4a): m=0.20 t=1024 +0.0238 / -6.24% (38% of the gap gone; rest is steps 0-1106).
+  Next (user, 2026-11-12): exact end + t=2048 (width 8,192), pair vocab-prune-m0.20-t2048-xe; no code change.
   Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
   estimate; every id still pushed down). Weighted CE kernel = record source + 4 text swaps
   (portable/weighted_ce.py). Widths t=1024: m=0.20 7,168; 0.15 7,680; 0.10 10,240-12,160.
