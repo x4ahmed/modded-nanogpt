@@ -86,8 +86,8 @@
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done), vocabulary pruning (this branch), mHC (not
-  started). Notion "Ideas vs Results": Phase 2 scoreboard rows 1-2 AttnRes, 3-6 ranked sweep (2026-11-11);
-  idea notes carry the sweep, why it fails, and the stratified fix as "Next".
+  started). Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 AttnRes, 3-6 ranked, 7-9 stratified,
+  10 exact end (2026-11-12). Idea notes: one short Setup / Result / Takeaway block per row group.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging
