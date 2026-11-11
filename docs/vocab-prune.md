@@ -248,6 +248,17 @@ done
 Logs: `VOCAB_PRUNE mode=stratified mass=... tail=1024 width=...` at start; `VOCAB_PRUNE run
 overflow_microbatches=0 ...` before `final_val_loss`.
 
+### Stratified results (seed 999, commit 2bf3d65)
+
+| m, t | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| 0.20, 1024 (width 7,168 on every step) | 3.294050 / 862.441 | 3.332638 / 793.914 | +0.0386 | -68.5 s (-7.95%) |
+
+No overflow; 49,989 ids seen. Against the ranked sweep (+0.59 at m = 0.15) the reweighted tail recovers
+~94% of the lost loss at almost the same speed, but +0.0386 is still 19x the 0.002 bar. Suspects: the
+last 87 steps are no longer exact (record_late: even P = 24,576 there cost +0.0064), the estimator's
+noise and its low bias of log Z (1,024 draws at weight ~42), and the narrow width throughout.
+
 ## Options considered before the census
 
 - Fewer than ~5,000 removable ids (train count 0, validation hits ~0): the time gain is below pair noise.
