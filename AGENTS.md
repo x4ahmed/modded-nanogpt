@@ -49,9 +49,8 @@
   the GPU instead of the host builder (port-only; user: no time on port-only gains, 2026-11-11).
 - STRATIFIED FIX (user, 2026-11-11): RTX_VOCAB_PRUNE_TAIL=t with a mass. RESULTS t=1024, seed-999 pairs
   at 2bf3d65 (loss / time): m=0.20 +0.0386 / -7.95%; 0.15 +0.0340 / -6.79%; 0.10 +0.0240 / -5.40%.
-  All 12-19x the bar; ~0.005 loss per 1% time at every mass. User chose the exact ending next:
-  RTX_VOCAB_PRUNE_EXACT_END=1 keeps full softmax on steps 1107-1193 (implemented 2026-11-11, pair
-  vocab-prune-m0.20-t1024-xe not yet run; command in docs/vocab-prune.md "Exact ending").
+  All 12-19x the bar; ~0.005 loss per 1% time. Next (user): RTX_VOCAB_PRUNE_EXACT_END=1 = full softmax
+  on steps 1107-1193 (2411e4a); pair vocab-prune-m0.20-t1024-xe not yet run (docs "Exact ending").
   Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
   estimate; every id still pushed down). Weighted CE kernel = record source + 4 text swaps
   (portable/weighted_ce.py). Widths t=1024: m=0.20 7,168; 0.15 7,680; 0.10 10,240-12,160.
