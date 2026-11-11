@@ -16,6 +16,7 @@ under PORTABLE and default to values sized for one 32 GB RTX 5090:
   RTX_VOCAB_PRUNE_MASS   experiment/vocab-prune: 0 (default) = exact pruning of never-seen ids on the
                          full-softmax steps; m in vocab_prune.KEPT_IDS_BY_MASS = ranked pruning on every
                          step at the width covering 1 - m of the training text (portable/vocab_prune.py).
+  RTX_VOCAB_PRUNE_TAIL   with a mass: t uniform, reweighted tail ids per set (stratified mode; 0 = off).
 """
 import os
 
@@ -32,6 +33,7 @@ EVAL_CE_SLAB_ROWS = int(os.environ.get("RTX_EVAL_CE_SLAB_ROWS", "4096"))
 WARMUP_MICROBATCHES = int(os.environ.get("RTX_WARMUP_MICROBATCHES", "2"))
 MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") else None
 VOCAB_PRUNE_MASS = float(os.environ.get("RTX_VOCAB_PRUNE_MASS") or "0")
+VOCAB_PRUNE_TAIL = int(os.environ.get("RTX_VOCAB_PRUNE_TAIL") or "0")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048
@@ -44,3 +46,6 @@ if VOCAB_PRUNE_MASS:
         raise ValueError(f"RTX_VOCAB_PRUNE_MASS={VOCAB_PRUNE_MASS}: use 0 or one of {sorted(KEPT_IDS_BY_MASS)}")
     # The width floor comes from the census at 16,384-token microbatches.
     assert MICROBATCH_TOKENS == RANKED_MICROBATCH_TOKENS, "ranked pruning is sized for 16384-token microbatches"
+if VOCAB_PRUNE_TAIL:
+    assert VOCAB_PRUNE_MASS, "RTX_VOCAB_PRUNE_TAIL needs RTX_VOCAB_PRUNE_MASS > 0"
+    assert VOCAB_PRUNE_TAIL % 128 == 0 and 128 <= VOCAB_PRUNE_TAIL <= 4096, "tail: a multiple of 128, 128-4096"

@@ -2,8 +2,9 @@
 
 Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). Idea (Notion, 2026-11-05):
 check how often each token appears in the training data and drop the tokens that are not needed.
-Status: ranked sweep run 2026-11-11 (results at the end of "Ranked pruning sweep"): every mass wrecks
-the loss. Exact pruning (mass 0) is implemented but was never run.
+Status: ranked sweep run 2026-11-11: every mass wrecks the loss (results at the end of "Ranked pruning
+sweep"). Its fix, stratified pruning (last section), is implemented and not yet run. Exact pruning
+(mass 0) is implemented and was never run.
 
 ## Where the vocabulary still costs time
 
@@ -197,6 +198,55 @@ baselines agree (3.2946-3.2959, 862.4-865.8 s).
   negatives (expected: same loss as the baseline, ~1% faster; a port-only gain, since the 8-GPU record
   already overlaps its host build); (2) ranked fill mixed with uniform negatives, so every id is still
   visited. Continuing or closing is the user's call.
+
+## Stratified pruning: the fix (2026-11-11, implemented, not yet run)
+
+User request: keep the time saving, keep the loss, and only in a form that transfers to the 8-GPU
+record (no port-only gains). `RTX_VOCAB_PRUNE_TAIL=t` together with a mass m:
+
+- Exact part: the microbatch's targets plus the best-ranked ids, at width ranked_width(m) (as in the
+  ranked sweep). Every target stays exact.
+- Tail: t ids drawn uniformly at random from ALL remaining ids (own torch.Generator, seed 20011, reset
+  after warmup; the global RNG streams are untouched). Each carries weight w = (remaining ids) / t.
+- Loss: normalizes over Z_hat = sum_exact exp(z) + w * sum_tail exp(z), an unbiased estimate of the full
+  softmax's Z (CPU test: mean within 2% over 400 draws; without weights the same sets miss over half the
+  mass). Every id is drawn now and then, so every id is still pushed down with the right average
+  strength: this removes the ranked sweep's failure. log Z_hat is slightly biased low (Jensen); the
+  tail size sets that noise.
+- Kernel: `portable/weighted_ce.py` compiles the record's CE kernel source with four text substitutions
+  that add col_logw[c] = log w_c to every exp() (forward sum, dense gradient, target correction); a CPU
+  test checks that removing them gives back the record's source exactly. Record kernels are untouched.
+  First GPU check is the pair's smoke gate.
+- Prefix targets (stages 0-1) are kept only on exact columns, as the record drops prefix targets outside
+  its set.
+- Widths: min(record width, ranked_width(m) + t). With t = 1,024:
+
+| m | Widths | Width-based time ceiling (measured rate - FLOP bound) |
+| --- | --- | --- |
+| 0.20 (and above: floor) | 7,168 | 9.8 - 50.1 s |
+| 0.15 | 7,680 | 9.3 - 47.5 s |
+| 0.10 | 10,240 / 12,160 | 5.6 - 28.9 s |
+
+Transfer: the estimator is the transferable part. On 8xH100 each rank's microbatch has ~11k distinct
+targets (sampled_softmax.py), so the record's floor is ~12-13k plus the tail; there it would let the
+14,336 / 24,576 stages and the 87 full-softmax steps narrow. The local gain from building sets on the
+GPU is port-only and is not claimed.
+
+```bash
+source ~/venvs/nanogpt/bin/activate
+cd ~/speed-run/modded-nanogpt
+git fetch origin
+git switch experiment/vocab-prune
+git pull --ff-only origin experiment/vocab-prune
+git show-ref --verify --quiet refs/heads/baseline || git branch baseline origin/baseline
+for m in 0.20 0.15 0.10; do
+  python -u tools/run_pair.py --seeds 999 --label vocab-prune-m$m-t1024 \
+    --candidate-env RTX_VOCAB_PRUNE_MASS=$m --candidate-env RTX_VOCAB_PRUNE_TAIL=1024
+done
+```
+
+Logs: `VOCAB_PRUNE mode=stratified mass=... tail=1024 width=...` at start; `VOCAB_PRUNE run
+overflow_microbatches=0 ...` before `final_val_loss`.
 
 ## Options considered before the census
 

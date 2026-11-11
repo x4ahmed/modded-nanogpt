@@ -40,25 +40,28 @@
   the exact 328,663,040 training targets, CPU only): 49,989 of 50,257 ids occur; 268 never (mostly
   invalid-UTF-8 byte and control-char tokens), 1 validation token on them. Train counts < 10 / 100 /
   1000: 587 / 2,337 / 26,841 ids; validation hits 68 / 3,580 / 421,761. 99% coverage: 36,968 ids.
-- USER REQUEST 2026-11-10: implement pruning and run a pair to verify. Implemented (one GPU only):
-  every microbatch marks its targets seen (GPU); steps 1107-1193 run the sampled CE kernels over a
-  fixed 50,048-wide set = ids seen as targets so far + never-seen fill (exact for every target; C is
-  rebuilt if a new id appears; full-softmax fallback if > 50,048 seen). Logs VOCAB_PRUNE lines.
-  Prediction: time -0.1..+0.2 s, loss within noise. Pair not run yet; it is the 0% point of the sweep.
+- EXACT MODE (mass 0, default): steps 1107-1193 run over the 50,048 ids seen as targets so far (only
+  never-seen ids leave). Implemented, never run; predicted effect below pair noise.
 - RANKED SWEEP (RTX_VOCAB_PRUNE_MASS=m: microbatch targets + most frequent ids so far, GPU-built, width
   min(record, ids covering 1-m), floor 6,144). RESULT 2026-11-11, seed-999 pairs at 74cf685 (loss / time):
   m=0.15 +0.5885 / -8.46%; 0.10 +0.5973 / -5.36%; 0.05 +0.5498 / -3.34%; 0.01 +0.3577 / -1.70%.
   Loss is wrecked at every mass, even 0.01 (record widths on 93% of steps): ranked fill means ids
   outside the set are never negatives, so their logits stay high and steal probability at validation.
   m=0.01 still saved 14.7 s with a 1-5 s width ceiling: ~10 s of the gain is building candidates on
-  the GPU instead of the host builder. Exact mode (m=0) never run. Next step is the user's call.
+  the GPU instead of the host builder (port-only; user: no time on port-only gains, 2026-11-11).
+- STRATIFIED FIX (user, 2026-11-11; implemented, not yet run): RTX_VOCAB_PRUNE_TAIL=t with a mass.
+  Set = targets + best-ranked ids (exact part, width ranked_width(m)) + t uniform draws from ALL other
+  ids, each weighted rest/t: loss normalizes over an unbiased estimate of the full softmax Z, so every
+  id is still pushed down. Weighted CE kernel = record source + 4 text swaps (portable/weighted_ce.py);
+  record kernels untouched. Prefix targets only on exact columns. Sweep t=1024, m=0.20/0.15/0.10:
+  widths 7,168 / 7,680 / 10,240-12,160; width ceilings 10-50 / 9-48 / 6-29 s. Masses > 0.20 = floor.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
   short report and CENSUS_COMPLETE dir=logs/token-census/<UTC> (counts.npz, summary.json).
-- Pair per mass: python -u tools/run_pair.py --seeds 999 --label vocab-prune-m<m> --candidate-env
-  RTX_VOCAB_PRUNE_MASS=<m> (run_pair gained --candidate-env here: gate + candidate only). Loop in
-  docs/vocab-prune.md. Standalone runs self-name vocab-prune-m<m>-1gpu-seed-N.
+- Pair per point: python -u tools/run_pair.py --seeds 999 --label vocab-prune-m<m>-t<t>
+  --candidate-env RTX_VOCAB_PRUNE_MASS=<m> --candidate-env RTX_VOCAB_PRUNE_TAIL=<t> (gate + candidate
+  only). Loop in docs/vocab-prune.md. Standalone runs self-name vocab-prune-m<m>[-t<t>]-1gpu-seed-N.
 - GPU smoke: python -u tests/check_rtx5090.py --seed 999.
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 
@@ -83,10 +86,9 @@
   kept on its own branch). Gram NS: little total-run potential.
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
-- Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done above), vocabulary pruning (this branch;
-  census shows no measurable time lever), mHC (not started).
-  Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 = the AttnRes pairs. Its "Phase 2: Idea
-  Notes" bullets carry What we did / Conclusion sub-bullets (AttnRes, pruning) and mHC "not started".
+- Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done), vocabulary pruning (this branch), mHC (not
+  started). Notion "Ideas vs Results": Phase 2 scoreboard rows 1-2 AttnRes, 3-6 ranked sweep (2026-11-11);
+  idea notes carry the sweep, why it fails, and the stratified fix as "Next".
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging

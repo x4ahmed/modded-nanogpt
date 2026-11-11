@@ -74,6 +74,8 @@ class SampledLoss:
     target_pos: Tensor  # (T_max,) int64: position in C of each token's target (first T rows are live)
     prefix_pos: Tensor  # (T_max,) int64: position in C of each token's prefix target, -1 if absent
     vocab_pos: Tensor   # (V,) int32: position in C of each class, -1 if not a candidate
+    # experiment/vocab-prune (stratified mode only): (P,) fp32 log weight of each candidate column.
+    col_logw: Tensor | None = None
 
 
 class CandidateBuilder:

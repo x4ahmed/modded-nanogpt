@@ -14,7 +14,7 @@ from track_1_short.config import LR_COOLDOWN_FRAC, SPLIT_EMBED_STAGE, TRAINING_S
 from track_1_short.portable import vocab_prune
 from track_1_short.portable.vocab_prune import (
     KEPT_IDS_BY_MASS, MIN_RANKED_WIDTH, PRUNED_WIDTH, RankedCandidates, SeenTargets, build_candidate_set,
-    pruned_counts, ranked_counts, ranked_width,
+    pruned_counts, ranked_counts, ranked_width, ranked_widths_in_use, weighted_kernel_source,
 )
 from track_1_short.schedule import TrainingSchedule
 
@@ -147,7 +147,8 @@ class RankedModeTests(unittest.TestCase):
     def test_build_keeps_targets_and_fills_by_rank(self):
         r = RankedCandidates(20, 64, "cpu")
         r.build(0, torch.tensor([7, 7, 7, 3, 3, 9]), 6)  # step 0 counts: 7 x3, 3 x2, 9 x1
-        cand = r.build(1, torch.tensor([12, 0]), 6)  # step 1 ranks by step 0's counts
+        cand, logw = r.build(1, torch.tensor([12, 0]), 6)  # step 1 ranks by step 0's counts
+        self.assertIsNone(logw)
         self.assertEqual(cand.tolist(), [0, 1, 3, 7, 9, 12])  # targets 0, 12; then 7, 3, 9; then id 1
         self.assertEqual(int(r.overflow), 0)
         r.build(1, torch.arange(10), 6)
@@ -198,6 +199,115 @@ class RankedModeTests(unittest.TestCase):
                 self.assertEqual(fresh().VOCAB_PRUNE_MASS, 0.05)
             with patch.dict(os.environ, RTX_VOCAB_PRUNE_MASS="0.06"), self.assertRaises(ValueError):
                 fresh()
+        finally:
+            if original is not None:
+                sys.modules[name] = original
+
+
+def record_kernel_source():
+    import ast
+    from pathlib import Path
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "track_1_short/perf/kernels/cross_entropy.py").read_text())
+    return next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], "id", "") == "CE_KERNEL_SOURCE")
+
+
+class StratifiedModeTests(unittest.TestCase):
+    def test_weighted_kernel_is_the_record_kernel_plus_column_weights(self):
+        source = record_kernel_source()
+        weighted = weighted_kernel_source(source)
+        self.assertEqual(weighted.count("col_logw"), 4)  # parameter, forward sum, dense grad, target grad
+        self.assertIn("__expf(tmp - A + col_logw[idx + k])", weighted)
+        self.assertIn("__expf(z - lse + col_logw[idx + j + t])", weighted)
+        self.assertIn("__expf(z - lse + col_logw[target])", weighted)
+        self.assertNotIn("col_logw", source)  # the record's source is untouched
+        stripped = (weighted.replace("    const float* __restrict__ col_logw,\n", "")
+                    .replace(" + col_logw[idx + k]", "").replace(" + col_logw[idx + j + t]", "")
+                    .replace(" + col_logw[target]", ""))
+        self.assertEqual(stripped, source)
+
+    def test_widths_add_the_tail(self):
+        self.assertEqual(ranked_counts([10240, 14336, 24576, 0], 0.15, VOCAB, 1024), [7680] * 4)
+        self.assertEqual(ranked_counts([10240, 14336, 24576, 0], 0.10, VOCAB, 1024), [10240, 12160, 12160, 12160])
+        self.assertEqual(ranked_widths_in_use((10240, 14336, 24576), 0.20, 1024, VOCAB), (7168,))
+
+    def test_build_keeps_exact_part_and_draws_a_weighted_tail(self):
+        V, width, tail = 2000, 300, 64
+        r = RankedCandidates(V, 512, "cpu", tail)
+        rng = np.random.default_rng(3)
+        r.build(0, torch.from_numpy(rng.integers(0, 500, 400)), width)  # step 0 builds counts
+        targets = torch.from_numpy(rng.integers(0, V, 200))
+        cand, logw = r.build(1, targets, width)
+        self.assertEqual(cand.numel(), width)
+        self.assertEqual(cand.unique().numel(), width)
+        self.assertTrue(torch.all(cand[1:] > cand[:-1]))
+        self.assertTrue(torch.isin(targets, cand).all())
+        in_tail = r.tail_mask[cand]
+        self.assertEqual(int(in_tail.sum()), tail)
+        self.assertFalse((r.exact & r.tail_mask).any())
+        self.assertEqual(int(r.exact.sum()), width - tail)
+        expected = float(np.log((V - (width - tail)) / tail))
+        self.assertTrue(torch.allclose(logw[in_tail], torch.tensor(expected)))
+        self.assertTrue((logw[~in_tail] == 0).all())
+
+    def test_weighted_normalizer_is_unbiased(self):
+        V, width, tail = 3000, 500, 128
+        r = RankedCandidates(V, 512, "cpu", tail)
+        torch.manual_seed(0)
+        z = torch.randn(V) * 1.5
+        targets = torch.randint(0, V, (150,))
+        full = torch.exp(z).sum()
+        estimates = []
+        for draw in range(400):
+            cand, logw = r.build(0, targets, width)
+            estimates.append(torch.exp(z[cand] + logw).sum())
+        mean = torch.stack(estimates).mean()
+        self.assertLess(abs(float(mean / full) - 1), 0.02)
+        # Without the weights the same sets miss most of the tail mass: the record_late / ranked bias.
+        unweighted = torch.exp(z[cand]).sum()
+        self.assertLess(float(unweighted / full), 0.5)
+
+    def test_stratified_wiring_drops_tail_prefixes_and_fills_weights(self):
+        sampled = import_portable_sampled()
+        D = 16
+        lm = torch.empty_strided((D, VOCAB), (1, D), dtype=torch.float8_e4m3fn)
+        lm.T.copy_(torch.randn(VOCAB, D).clamp(-4, 4).to(torch.float8_e4m3fn))
+        s = sampled.PortableSampledSoftmax(schedule(), VOCAB, D, 512, "cpu", mass=0.15, tail=1024)
+        self.assertEqual(set(s.counts[:1194]), {7680})
+        self.assertIn("mode=stratified mass=0.15 tail=1024 width=7680", s.describe())
+        prefix = np.full(VOCAB, -1, dtype=np.int64)
+        prefix[:VOCAB // 2] = np.arange(VOCAB // 2, VOCAB)  # half the ids have a prefix target
+        s.set_prefix_table(prefix)
+        rng = np.random.default_rng(4)
+        for step in (0, 1, 700, 1150):
+            targets = torch.from_numpy(rng.integers(0, 50_257, 512))
+            inputs = s.prepare(step, targets, lm)
+            P = s.counts[step]
+            cand = s.candidates[:P]
+            self.assertTrue(torch.equal(cand[inputs.target_pos[:512]], targets))
+            self.assertEqual(int((inputs.col_logw > 0).sum()), 1024)
+            self.assertTrue(torch.equal(inputs.col_logw > 0, s.ranked.tail_mask[cand]))
+            pp = inputs.prefix_pos[:512]
+            live = pp >= 0
+            self.assertTrue(s.ranked.exact[cand[pp[live]]].all())  # prefix targets only on exact columns
+            has = torch.from_numpy(prefix)[targets] >= 0
+            dropped = has & ~s.ranked.exact[torch.from_numpy(prefix)[targets].clamp(min=0)]
+            self.assertTrue((pp[dropped] == -1).all())
+
+    def test_config_validates_the_tail(self):
+        name = "track_1_short.portable.config"
+        original = sys.modules.get(name)
+
+        def fresh():
+            sys.modules.pop(name, None)
+            return importlib.import_module(name)
+
+        try:
+            with patch.dict(os.environ, RTX_VOCAB_PRUNE_MASS="0.15", RTX_VOCAB_PRUNE_TAIL="1024"):
+                self.assertEqual(fresh().VOCAB_PRUNE_TAIL, 1024)
+            for env in (dict(RTX_VOCAB_PRUNE_TAIL="1024"), dict(RTX_VOCAB_PRUNE_MASS="0.15", RTX_VOCAB_PRUNE_TAIL="1000")):
+                with self.subTest(env=env), patch.dict(os.environ, env), self.assertRaises(AssertionError):
+                    fresh()
         finally:
             if original is not None:
                 sys.modules[name] = original

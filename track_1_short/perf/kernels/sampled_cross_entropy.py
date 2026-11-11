@@ -38,7 +38,8 @@ for _p in ALL_CANDIDATE_COUNTS:
 # Ranked pruning (RTX_VOCAB_PRUNE_MASS > 0) adds its width; every width is a multiple of 128.
 CE_WIDTHS = ALL_CANDIDATE_COUNTS
 if portable_config.PORTABLE:
-    _ranked = {ranked_width(portable_config.VOCAB_PRUNE_MASS)} if portable_config.VOCAB_PRUNE_MASS else set()
+    _ranked = ({ranked_width(portable_config.VOCAB_PRUNE_MASS)}
+               if portable_config.VOCAB_PRUNE_MASS and not portable_config.VOCAB_PRUNE_TAIL else set())
     CE_WIDTHS = tuple(sorted({*ALL_CANDIDATE_COUNTS, PRUNED_WIDTH} | _ranked))
 SAMPLED_CE_KERNELS = {p: compile_ce_kernel(p) for p in CE_WIDTHS}
 

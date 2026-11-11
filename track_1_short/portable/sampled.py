@@ -31,13 +31,14 @@ from track_1_short.schedule import TrainingSchedule
 
 class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
-                 device: torch.device, mass: float | None = None):
+                 device: torch.device, mass: float | None = None, tail: int | None = None):
         self.schedule = schedule
         self.mass = rtx.VOCAB_PRUNE_MASS if mass is None else mass
+        self.tail = (rtx.VOCAB_PRUNE_TAIL if tail is None else tail) if self.mass else 0
         record_counts = [candidate_count_at(schedule, s) for s in range(schedule.total_steps + 1)]
         # Exact mode: the record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
         self.pruned_steps = frozenset(s for s, count in enumerate(record_counts) if not count)
-        self.counts = (ranked_counts(record_counts, self.mass, vocab_size) if self.mass
+        self.counts = (ranked_counts(record_counts, self.mass, vocab_size, self.tail) if self.mass
                        else pruned_counts(record_counts))
         p_values = sorted(set(self.counts) - {0})
         assert p_values
@@ -53,11 +54,12 @@ class PortableSampledSoftmax:
         self.loss_inputs = {
             p: SampledLoss(rows=torch.zeros(p, model_dim, dtype=e4m3, device=device),
                            rows_t=torch.zeros(model_dim, p, dtype=e4m3, device=device),
-                           target_pos=target_pos, prefix_pos=prefix_pos, vocab_pos=vocab_pos)
+                           target_pos=target_pos, prefix_pos=prefix_pos, vocab_pos=vocab_pos,
+                           col_logw=torch.zeros(p, dtype=torch.float32, device=device) if self.tail else None)
             for p in p_values
         }
         self.seen = SeenTargets(vocab_size, PRUNED_WIDTH, device)
-        self.ranked = RankedCandidates(vocab_size, max_rows, device) if self.mass else None
+        self.ranked = RankedCandidates(vocab_size, max_rows, device, self.tail) if self.mass else None
         self.prefix_table_d: Tensor | None = None
         self.reset()
 
@@ -84,6 +86,10 @@ class PortableSampledSoftmax:
         for s in range(self.schedule.total_steps):
             by_stage.setdefault(_stage_index(self.schedule, s), []).append(self.counts[s])
         widths = "; ".join(f"stage {i}: " + "/".join(map(str, dict.fromkeys(w))) for i, w in by_stage.items())
+        if self.tail:
+            return (f"mode=stratified mass={self.mass} tail={self.tail} width={ranked_width(self.mass) + self.tail} "
+                    f"on every step ({widths}); candidates = microbatch targets + most frequent ids so far + "
+                    f"{self.tail} uniform tail ids weighted rest/{self.tail}")
         return (f"mode=ranked mass={self.mass} width={ranked_width(self.mass)} on every step ({widths}); "
                 f"candidates = microbatch targets + most frequent ids so far")
 
@@ -155,7 +161,10 @@ class PortableSampledSoftmax:
         P = self.counts[step]
         inputs = self.loss_inputs[P]
         cand = self.candidates[:P]
-        cand.copy_(self.ranked.build(step, targets, P))
+        candidates, col_logw = self.ranked.build(step, targets, P)
+        cand.copy_(candidates)
+        if col_logw is not None:
+            inputs.col_logw.copy_(col_logw)
         torch.index_select(lm_head_f8_col.T.view(torch.uint8), 0, cand, out=inputs.rows.view(torch.uint8))
         transpose_copy(inputs.rows.view(torch.uint8), inputs.rows_t.view(torch.uint8))
         inputs.vocab_pos.fill_(-1)
@@ -166,8 +175,10 @@ class PortableSampledSoftmax:
         if self.prefix_table_d is None:
             inputs.prefix_pos[:n].fill_(-1)
         else:
-            # As the record: a prefix target outside the set is dropped (-1, the kernel's no-op).
+            # As the record: a prefix target outside the set is dropped (-1, the kernel's no-op); with a
+            # tail, also one that is only a (weighted) tail column: prefix targets stay exact.
             prefix = self.prefix_table_d.index_select(0, targets)
-            pos = inputs.vocab_pos.index_select(0, prefix.clamp(min=0))
-            inputs.prefix_pos[:n].copy_(torch.where(prefix >= 0, pos, -1))
+            safe = prefix.clamp(min=0)
+            pos = inputs.vocab_pos.index_select(0, safe)
+            inputs.prefix_pos[:n].copy_(torch.where((prefix >= 0) & self.ranked.exact[safe], pos, -1))
         return inputs

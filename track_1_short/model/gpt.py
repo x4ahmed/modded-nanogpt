@@ -26,6 +26,7 @@ from track_1_short.perf.kernels.sampled_cross_entropy import SampledSoftcappedCr
 from track_1_short.perf.kernels.value_embed import value_embed_lookup
 from track_1_short.perf.residual_fusion import rms_norm_with_head, scale, scale_add
 from track_1_short.portable import config as portable_config
+from track_1_short.portable.weighted_ce import WeightedSampledSoftcappedCrossEntropy
 from track_1_short.sampled_softmax import SampledLoss
 
 # Layer topology (11 layers). Depth cut from record #360 (ANVIL2): layer 7 is removed whole -- its
@@ -800,11 +801,18 @@ class GPT(nn.Module):
         if self.training and sampled_loss is not None:
             # Targets and prefix targets arrive as positions in the candidate set, built on the host.
             n = target_seq.size(0)
-            loss_per_token = SampledSoftcappedCrossEntropy.apply(
-                x.view(-1, x.size(-1)), mtp_weights, sampled_loss.target_pos[:n], sampled_loss.prefix_pos[:n],
-                prefix_weight, self.lm_head.weight, sampled_loss.rows, sampled_loss.rows_t, sampled_loss.vocab_pos,
-                self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s,
-            )
+            if sampled_loss.col_logw is not None:  # experiment/vocab-prune, stratified mode
+                loss_per_token = WeightedSampledSoftcappedCrossEntropy.apply(
+                    x.view(-1, x.size(-1)), mtp_weights, sampled_loss.target_pos[:n], sampled_loss.prefix_pos[:n],
+                    prefix_weight, self.lm_head.weight, sampled_loss.rows, sampled_loss.rows_t, sampled_loss.vocab_pos,
+                    sampled_loss.col_logw, self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s,
+                )
+            else:
+                loss_per_token = SampledSoftcappedCrossEntropy.apply(
+                    x.view(-1, x.size(-1)), mtp_weights, sampled_loss.target_pos[:n], sampled_loss.prefix_pos[:n],
+                    prefix_weight, self.lm_head.weight, sampled_loss.rows, sampled_loss.rows_t, sampled_loss.vocab_pos,
+                    self.lm_head.x_s, self.lm_head.w_s, self.lm_head.grad_s,
+                )
         elif self.training:
             prefix_target_seq = self.prefix_table[target_seq]
             loss_per_token = FusedSoftcappedCrossEntropy.apply(

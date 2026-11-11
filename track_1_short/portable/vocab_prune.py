@@ -8,6 +8,15 @@ RTX_VOCAB_PRUNE_MASS (portable/config.py):
   where ranked_width(m) is the number of ids that cover 1 - m of the training text (census table below).
   Every target stays a candidate, so its loss term is exact; only ids ranked below the cut that are not
   a target of the microbatch leave the normalizer. No fallback is needed. Validation is untouched.
+  RESULT (2026-11-11): +0.36..+0.60 loss at every mass -- ids outside the set are never negatives.
+- mass m > 0 with tail t > 0 (RTX_VOCAB_PRUNE_TAIL), "stratified": the fix. The set is the exact part
+  above at width ranked_width(m) (targets + best-ranked ids), plus t ids drawn uniformly at random from
+  ALL the remaining ids (the tail), at total width min(record width, ranked_width(m) + t). Each tail id
+  carries the weight w = (number of remaining ids) / t: the loss normalizes over
+  Z_hat = sum_exact exp(z) + w * sum_tail exp(z), an unbiased estimate of the full softmax's Z. Every id
+  is drawn now and then, so every id is still pushed down, with the right strength on average. The CE
+  kernel adds log w to the tail columns (portable/weighted_ce.py). Prefix targets outside the exact
+  part are dropped, as the record drops prefix targets outside its set.
 
 Exact mode in detail: from step 0, every microbatch's targets are marked "seen" on the GPU (one index_fill per
 microbatch). The steps the record runs on the full softmax (1107-1193) instead normalize over a
@@ -52,10 +61,43 @@ def ranked_width(mass: float) -> int:
     return max(MIN_RANKED_WIDTH, -(-kept // 128) * 128)
 
 
-def ranked_counts(record_counts: list[int], mass: float, vocab_size: int) -> list[int]:
-    """Per-step widths in ranked mode: the record's width (full softmax = vocab_size), capped at the mass's."""
-    width = ranked_width(mass)
+def ranked_counts(record_counts: list[int], mass: float, vocab_size: int, tail: int = 0) -> list[int]:
+    """Per-step widths in ranked mode: the record's width (full softmax = vocab_size), capped at the
+    mass's exact width plus the tail."""
+    width = ranked_width(mass) + tail
     return [min(count or vocab_size, width) for count in record_counts]
+
+
+def ranked_widths_in_use(record_widths, mass: float, tail: int, vocab_size: int) -> tuple[int, ...]:
+    """Every width ranked_counts can produce from these record widths (kernels compile per width)."""
+    return tuple(sorted(set(ranked_counts([*record_widths, 0], mass, vocab_size, tail))))
+
+
+def weighted_kernel_source(source: str) -> str:
+    """The record's CE kernel source with a per-column log weight (col_logw) added to every exp():
+    the forward sum, the dense gradient, and the sparse target correction. With col_logw == 0 it is the
+    record's kernel; the record's own source string is not modified."""
+    swaps = [
+        ("    const float* __restrict__ prefix_weight_ptr,\n",
+         "    const float* __restrict__ prefix_weight_ptr,\n    const float* __restrict__ col_logw,\n"),
+        ("thread_sum += __expf(tmp - A);", "thread_sum += __expf(tmp - A + col_logw[idx + k]);"),
+        ("          float sigmoid_u = __half2float(sigmoid_us[j + t]);\n"
+         "          float z = A * sigmoid_u;\n"
+         "          float p = __expf(z - lse);\n",
+         "          float sigmoid_u = __half2float(sigmoid_us[j + t]);\n"
+         "          float z = A * sigmoid_u;\n"
+         "          float p = __expf(z - lse + col_logw[idx + j + t]);\n"),
+        ("    float sigmoid_u = __half2float(smem[target]);\n"
+         "    float z = A * sigmoid_u;\n"
+         "    float p = __expf(z - lse);\n",
+         "    float sigmoid_u = __half2float(smem[target]);\n"
+         "    float z = A * sigmoid_u;\n"
+         "    float p = __expf(z - lse + col_logw[target]);\n"),
+    ]
+    for old, new in swaps:
+        assert source.count(old) == 1, f"CE kernel source changed: {old!r}"
+        source = source.replace(old, new)
+    return source
 
 
 class RankedCandidates:
@@ -66,13 +108,19 @@ class RankedCandidates:
     ranking (ids by count, descending) is recomputed once per step, from the counts before that step.
     """
 
-    def __init__(self, vocab_size: int, max_rows: int, device):
+    TAIL_SEED = 20011  # the tail's own generator: the global RNG streams are never touched
+
+    def __init__(self, vocab_size: int, max_rows: int, device, tail: int = 0):
         self.vocab_size = vocab_size
+        self.tail = tail
         self.counts = torch.zeros(vocab_size, dtype=torch.int32, device=device)
         self.is_target = torch.zeros(vocab_size, dtype=torch.bool, device=device)
         self.extra = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        self.exact = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        self.tail_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
         self.ones = torch.ones(max_rows, dtype=torch.int32, device=device)
         self.overflow = torch.zeros((), dtype=torch.int64, device=device)
+        self.generator = torch.Generator(device=device)
         self.reset()
 
     def reset(self):
@@ -80,9 +128,12 @@ class RankedCandidates:
         self.overflow.zero_()
         self.order = torch.arange(self.vocab_size, device=self.counts.device)
         self.ranked_step: int | None = None
+        self.generator.manual_seed(self.TAIL_SEED)
 
-    def build(self, step: int, targets: torch.Tensor, width: int) -> torch.Tensor:
-        """(width,) int64 candidate ids, ascending: all of `targets` plus the best-ranked other ids."""
+    def build(self, step: int, targets: torch.Tensor, width: int):
+        """(candidates, col_logw): (width,) int64 ids ascending -- all of `targets`, the best-ranked other
+        ids up to width - tail, and `tail` uniform draws from the rest -- and their (width,) fp32 log
+        weights (0 for exact ids, log(rest / tail) for tail ids; None without a tail)."""
         if self.ranked_step != step:
             self.order = torch.argsort(self.counts, descending=True, stable=True)
             self.ranked_step = step
@@ -90,14 +141,27 @@ class RankedCandidates:
         self.is_target.zero_()
         self.is_target.index_fill_(0, targets, True)
         n_targets = self.is_target.sum()
-        # Non-targets in rank order; keep the first width - n_targets of them.
+        budget = width - self.tail
+        # Non-targets in rank order; keep the first budget - n_targets of them.
         free = ~self.is_target[self.order]
-        take = free & (torch.cumsum(free, 0) <= width - n_targets)
+        take = free & (torch.cumsum(free, 0) <= budget - n_targets)
         self.extra.index_put_((self.order,), take)
-        # More distinct targets than the width cannot happen at the census floor; counted, never silent.
-        self.overflow += n_targets > width
-        selected = self.is_target | self.extra
-        return torch.argsort((~selected).to(torch.int8), stable=True)[:width]
+        # More distinct targets than the exact budget cannot happen at the census floor; counted, never silent.
+        self.overflow += n_targets > budget
+        torch.logical_or(self.is_target, self.extra, out=self.exact)
+        if not self.tail:
+            return torch.argsort((~self.exact).to(torch.int8), stable=True)[:width], None
+        # Uniform draw without replacement from the ids outside the exact part: the `tail` smallest keys.
+        keys = torch.rand(self.vocab_size, generator=self.generator, device=self.counts.device)
+        keys.masked_fill_(self.exact, 2.0)
+        self.tail_mask.zero_()
+        self.tail_mask.index_fill_(0, torch.topk(keys, self.tail, largest=False).indices, True)
+        selected = self.exact | self.tail_mask
+        candidates = torch.argsort((~selected).to(torch.int8), stable=True)[:width]
+        rest = self.vocab_size - self.exact.sum()
+        log_w = torch.log(rest.to(torch.float32) / self.tail)
+        col_logw = torch.where(self.tail_mask[candidates], log_w, torch.zeros((), device=log_w.device))
+        return candidates, col_logw
 
     def summary(self) -> str:
         """Reads the device counters (a sync): call off the clock."""
