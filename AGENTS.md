@@ -50,11 +50,9 @@
 - STRATIFIED FIX (user, 2026-11-11): RTX_VOCAB_PRUNE_TAIL=t with a mass. RESULT m=0.20 t=1024 (seed 999,
   pair at 2bf3d65): baseline 3.294050 / 862.441 s, candidate 3.332638 / 793.914 s: +0.0386 / -7.95%.
   15x better loss than ranked, still 19x the bar. m=0.15, 0.10 pairs running.
-  Set = targets + best-ranked ids (exact part, width ranked_width(m)) + t uniform draws from ALL other
-  ids, each weighted rest/t: loss normalizes over an unbiased estimate of the full softmax Z, so every
-  id is still pushed down. Weighted CE kernel = record source + 4 text swaps (portable/weighted_ce.py);
-  record kernels untouched. Prefix targets only on exact columns. Sweep t=1024, m=0.20/0.15/0.10:
-  widths 7,168 / 7,680 / 10,240-12,160; width ceilings 10-50 / 9-48 / 6-29 s. Masses > 0.20 = floor.
+  Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
+  estimate; every id still pushed down). Weighted CE kernel = record source + 4 text swaps
+  (portable/weighted_ce.py). Widths t=1024: m=0.20 7,168; 0.15 7,680; 0.10 10,240-12,160.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
