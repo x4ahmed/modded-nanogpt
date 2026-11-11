@@ -2,8 +2,8 @@
 
 Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). Idea (Notion, 2026-11-05):
 check how often each token appears in the training data and drop the tokens that are not needed.
-Status: census done 2026-11-10; exact pruning (mass 0) and ranked pruning over all steps (mass m > 0,
-section "Ranked pruning sweep") implemented. No GPU run yet.
+Status: ranked sweep run 2026-11-11 (results at the end of "Ranked pruning sweep"): every mass wrecks
+the loss. Exact pruning (mass 0) is implemented but was never run.
 
 ## Where the vocabulary still costs time
 
@@ -171,6 +171,32 @@ done
 Logs: `VOCAB_PRUNE mode=ranked mass=... width=... (widths by stage)` at start and
 `VOCAB_PRUNE run overflow_microbatches=0 distinct_seen=...` before `final_val_loss`. CPU tests:
 `tests/test_vocab_prune.py` (widths, ranking and selection, target/prefix mapping, config validation).
+
+### Sweep results (2026-11-11, seed 999, commit 74cf685, one pair per mass)
+
+| m | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| 0.15 | 3.294583 / 863.586 | 3.883074 / 790.490 | +0.5885 | -73.1 s (-8.46%) |
+| 0.10 | 3.295893 / 863.220 | 3.893151 / 816.955 | +0.5973 | -46.3 s (-5.36%) |
+| 0.05 | 3.295336 / 865.803 | 3.845152 / 836.872 | +0.5498 | -28.9 s (-3.34%) |
+| 0.01 | 3.295875 / 862.363 | 3.653614 / 847.660 | +0.3577 | -14.7 s (-1.70%) |
+
+All four runs: 1194 updates, no overflow (every target was a candidate), 49,989 ids seen. The four
+baselines agree (3.2946-3.2959, 862.4-865.8 s).
+
+- Loss: 180-300x the 0.002 bar, at every mass. Even m = 0.01, whose widths equal the record's on steps
+  0-1106, loses 0.36, so the cause is the fill, not the width. With frequency-ranked fill, an id outside
+  the set is a negative only when it happens to be a target elsewhere in the microbatch; tens of
+  thousands of ids are almost never pushed down, their logits stay near their high initial softcap value
+  (~15 of 23), and at validation, which scores all 50,304 ids, they absorb probability. The record's
+  uniform stride negatives exist to visit every class (sampled_softmax.py); this sweep shows why.
+- Time: real but partly not from the width. m = 0.01 saved 14.7 s against a 1-5 s width ceiling, and
+  m = 0.15 saved 73 s against a 10-53 s ceiling: about 10-20 s comes from building candidate sets on the
+  GPU (no per-microbatch host build and synchronous uploads), which the port does on the CPU.
+- Follow-ups this suggests, not run: (1) the device-side builder with the record's uniform stride
+  negatives (expected: same loss as the baseline, ~1% faster; a port-only gain, since the 8-GPU record
+  already overlaps its host build); (2) ranked fill mixed with uniform negatives, so every id is still
+  visited. Continuing or closing is the user's call.
 
 ## Options considered before the census
 

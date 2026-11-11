@@ -48,11 +48,13 @@
   fixed 50,048-wide set = ids seen as targets so far + never-seen fill (exact for every target; C is
   rebuilt if a new id appears; full-softmax fallback if > 50,048 seen). Logs VOCAB_PRUNE lines.
   Prediction: time -0.1..+0.2 s, loss within noise. Pair not run yet; it is the 0% point of the sweep.
-- RANKED SWEEP (user, 2026-11-10), implemented, not yet run: RTX_VOCAB_PRUNE_MASS=m > 0 -> every step
-  uses microbatch targets + most frequent ids so far (GPU-built), width min(record, W(m)); W(m) = ids
-  covering 1-m of training text (census rerun: 90% 11,038; 85% 6,576; 95% 19,977), floor 6,144 (max
-  5,292 distinct targets per microbatch). Masses: 0.001-0.30 (0.20 = 0.30 = floor). Ceilings 0.10:
-  6-32 s, 0.15: 10-53 s. Risk: never-negative rare logits drift. Sweep: 0.15, 0.10, 0.05, 0.01.
+- RANKED SWEEP (RTX_VOCAB_PRUNE_MASS=m: microbatch targets + most frequent ids so far, GPU-built, width
+  min(record, ids covering 1-m), floor 6,144). RESULT 2026-11-11, seed-999 pairs at 74cf685 (loss / time):
+  m=0.15 +0.5885 / -8.46%; 0.10 +0.5973 / -5.36%; 0.05 +0.5498 / -3.34%; 0.01 +0.3577 / -1.70%.
+  Loss is wrecked at every mass, even 0.01 (record widths on 93% of steps): ranked fill means ids
+  outside the set are never negatives, so their logits stay high and steal probability at validation.
+  m=0.01 still saved 14.7 s with a 1-5 s width ceiling: ~10 s of the gain is building candidates on
+  the GPU instead of the host builder. Exact mode (m=0) never run. Next step is the user's call.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
