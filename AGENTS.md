@@ -32,8 +32,6 @@
   candidates (all microbatch targets + uniform stride negatives), not 50,304 ids; validation masks ids
   the tokenizer cannot emit after the previous token (canonical mask, #350). Validation forward is
   off the clock.
-- Full-softmax steps 1107-1193 (24.6M of 328.7M tokens): anchor record_late (P=24,576 on the taper,
-  -1.7 s) -> ~0.1 s (FLOP bound ~0.4 s) per 1,000 ids removed; same-allocation time noise ~1-2 s.
 - Out of scope: retokenizing (changes the metric); choosing ids from validation counts (peeking).
   A removed id must keep finite probability: a validation token on it costs ~80 nats under -60 masking.
 - CENSUS DONE 2026-11-10 (cluster logs/token-census/20261110T214058Z; tools/token_census.py replays
