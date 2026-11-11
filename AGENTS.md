@@ -40,9 +40,6 @@
   the exact 328,663,040 training targets, CPU only): 49,989 of 50,257 ids occur; 268 never (mostly
   invalid-UTF-8 byte and control-char tokens), 1 validation token on them. Train counts < 10 / 100 /
   1000: 587 / 2,337 / 26,841 ids; validation hits 68 / 3,580 / 421,761. 99% coverage: 36,968 ids.
-- Reading: exact pruning saves <= 0.1 s (width 50,304 -> 50,048), far below pair noise; rarer cuts
-  need a fallback probability and stay < 1 s up to count < 100; only a whole-run two-level softmax
-  (head ~23.4K ids) reaches 1.9-9.7 s (0.2-1.1%), with new CE kernels and likely loss cost.
 - USER REQUEST 2026-11-10: implement pruning and run a pair to verify. Implemented (one GPU only):
   every microbatch marks its targets seen (GPU); steps 1107-1193 run the sampled CE kernels over a
   fixed 50,048-wide set = ids seen as targets so far + never-seen fill (exact for every target; C is
