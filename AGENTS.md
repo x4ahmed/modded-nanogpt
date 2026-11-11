@@ -49,7 +49,7 @@
   the GPU instead of the host builder (port-only; user: no time on port-only gains, 2026-11-11).
 - STRATIFIED FIX (user, 2026-11-11): RTX_VOCAB_PRUNE_TAIL=t with a mass. RESULT m=0.20 t=1024 (seed 999,
   pair at 2bf3d65): baseline 3.294050 / 862.441 s, candidate 3.332638 / 793.914 s: +0.0386 / -7.95%.
-  15x better loss than ranked, still 19x the bar. m=0.15, 0.10 pairs running.
+  15x better loss than ranked, still 19x the bar. m=0.15, 0.10 pairs: user paused 2026-11-11, rerun next.
   Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
   estimate; every id still pushed down). Weighted CE kernel = record source + 4 text swaps
   (portable/weighted_ce.py). Widths t=1024: m=0.20 7,168; 0.15 7,680; 0.10 10,240-12,160.
