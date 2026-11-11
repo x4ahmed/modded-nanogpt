@@ -26,8 +26,7 @@
 - Training commands require one allocated RTX 5090; no concurrent training on that GPU.
 - Local CPU tests: C:/Users/Ahmed/anaconda3/python.exe (torch 2.8, CPU); plain `python` is not on PATH.
 
-## This idea: vocabulary pruning (docs/vocab-prune.md)
-- Notion idea (2026-11-05): count how often each token appears in training data; drop unneeded ones.
+## This idea: vocabulary pruning (docs/vocab-prune.md; Notion 2026-11-05: drop unneeded tokens)
 - The record already prunes: sampled softmax (record #360) trains steps 0-1106 over 10,240-24,576
   candidates (all microbatch targets + uniform stride negatives), not 50,304 ids; validation masks ids
   the tokenizer cannot emit after the previous token (canonical mask, #350). Validation forward is
