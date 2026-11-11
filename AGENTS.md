@@ -53,8 +53,7 @@
   Exact end + t=2048 (width 8,192): +0.0093 / -4.60% (candidate 795.3 s ~ t=1024's; baseline drifted).
   Next (user, 2026-11-12): tail only, m=0.20 t=4096 NO exact end (width 10,240), vs row 7 (t=1024).
   Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
-  estimate; every id still pushed down). Weighted CE kernel = record source + 4 text swaps
-  (portable/weighted_ce.py). Widths t=1024: m=0.20 7,168; 0.15 7,680; 0.10 10,240-12,160.
+  estimate). Weighted CE kernel = record source + 4 text swaps (portable/weighted_ce.py).
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
