@@ -3,8 +3,8 @@
 Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). Idea (Notion, 2026-11-05):
 check how often each token appears in the training data and drop the tokens that are not needed.
 Status: ranked sweep run 2026-11-11: every mass wrecks the loss (results at the end of "Ranked pruning
-sweep"). Its fix, stratified pruning (last section), is implemented and not yet run. Exact pruning
-(mass 0) is implemented and was never run.
+sweep"). Its fix, stratified pruning (last section), ran at m = 0.20 / 0.15 / 0.10 (t = 1,024): loss
++0.024 to +0.039, time -5.4% to -8.0%; none meets the 0.002 bar. Exact pruning (mass 0) was never run.
 
 ## Where the vocabulary still costs time
 
@@ -199,7 +199,7 @@ baselines agree (3.2946-3.2959, 862.4-865.8 s).
   already overlaps its host build); (2) ranked fill mixed with uniform negatives, so every id is still
   visited. Continuing or closing is the user's call.
 
-## Stratified pruning: the fix (2026-11-11, implemented, not yet run)
+## Stratified pruning: the fix (2026-11-11; results at the end)
 
 User request: keep the time saving, keep the loss, and only in a form that transfers to the 8-GPU
 record (no port-only gains). `RTX_VOCAB_PRUNE_TAIL=t` together with a mass m:
@@ -253,11 +253,17 @@ overflow_microbatches=0 ...` before `final_val_loss`.
 | m, t | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
 | --- | --- | --- | --- | --- |
 | 0.20, 1024 (width 7,168 on every step) | 3.294050 / 862.441 | 3.332638 / 793.914 | +0.0386 | -68.5 s (-7.95%) |
+| 0.15, 1024 (width 7,680 on every step) | 3.295977 / 843.1 | 3.329950 / 785.8 | +0.0340 | -57.3 s (-6.79%) |
+| 0.10, 1024 (widths 10,240 / 12,160) | 3.294737 / 850.9 | 3.318744 / 805.0 | +0.0240 | -45.9 s (-5.40%) |
 
 No overflow; 49,989 ids seen. Against the ranked sweep (+0.59 at m = 0.15) the reweighted tail recovers
-~94% of the lost loss at almost the same speed, but +0.0386 is still 19x the 0.002 bar. Suspects: the
-last 87 steps are no longer exact (record_late: even P = 24,576 there cost +0.0064), the estimator's
-noise and its low bias of log Z (1,024 draws at weight ~42), and the narrow width throughout.
+~94% of the lost loss at almost the same speed, but every point is 12-19x the 0.002 bar. The trade is
+nearly linear: ~0.0044-0.0050 loss per 1% time at all three masses, so no mass is a sweet spot.
+m = 0.10 keeps the record's width in stage 1 and still loses +0.024, so narrowing alone does not explain
+the damage. Suspects: the last 87 steps are no longer exact (record_late: even P = 24,576 there cost
++0.0064), and the estimator's noise and low bias of log Z (1,024 draws at weight ~42).
+Candidate next tests (user's call): an exact ending (full softmax on steps 1107-1193 in stratified mode),
+or a larger tail (2,048).
 
 ## Options considered before the census
 
