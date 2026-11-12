@@ -51,7 +51,8 @@
   All 12-19x the bar; ~0.005 loss per 1% time. EXACT END (RTX_VOCAB_PRUNE_EXACT_END=1, full softmax on
   1107-1193, 2411e4a): m=0.20 t=1024 +0.0238 / -6.24% (38% of the gap gone; rest is steps 0-1106).
   Exact end + t=2048 (width 8,192): +0.0093 / -4.60% (candidate 795.3 s ~ t=1024's; baseline drifted).
-  Next (user, 2026-11-12): tail only, m=0.20 t=4096 NO exact end (width 10,240), vs row 7 (t=1024).
+  Tail only m=0.20 t=4096 (width 10,240): +0.0123 / +0.94%. Loss -68% vs t=1024; time +47 s vs t=1024:
+  builder overhead scaling with tail (suspect topk k=4096), unverified; docs "Tail only".
   Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
   estimate). Weighted CE kernel = record source + 4 text swaps (portable/weighted_ce.py).
 
@@ -87,7 +88,7 @@
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done), vocabulary pruning (this branch), mHC (not
   started). Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 AttnRes, 3-6 ranked, 7-9 stratified,
-  10-11 exact end (2026-11-12). Idea notes: one short Setup / Result / Takeaway block per row group.
+  10-11 exact end, 12 tail 4096 (2026-11-12). Idea notes: one short Setup / Result / Takeaway block per row group.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging

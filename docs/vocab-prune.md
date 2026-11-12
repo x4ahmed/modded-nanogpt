@@ -298,6 +298,20 @@ this pair's faster baseline (833.6 vs 847.2 s, session drift). ~0.0020 loss per 
 0.002 bar. If the gap scales ~1/t, t = 4,096 (width 10,240 = the record's stage-1 width) lands near
 +0.005; stages 2-4 (14,336 / 24,576) are then the only narrowing.
 
+### Tail only, t = 4,096 (2026-11-12; isolates the tail, compare with t = 1,024 at m = 0.20)
+
+| Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| m 0.20, t 4096, no exact end (width 10,240) | 3.294255 / 833.459 | 3.306522 / 841.328 | +0.0123 | +7.9 s (+0.94%) |
+
+- Loss: the tail alone cuts the gap from +0.0386 (t = 1,024) to +0.0123 (-68%). Exact end + t = 2,048
+  (+0.0093) is still better, so both parts help.
+- Time: unexpected. The candidate is 47 s slower than t = 1,024 (793.9 s) and 36 s slower than m = 0.10
+  t = 1,024 (805.0 s), which runs wider sets (10,240 / 12,160). So the cost tracks the tail size, not
+  the width: an overhead in the set builder, not in the GEMM / CE work. Unverified suspect: the tail
+  draw `torch.topk(keys, 4096)` (sorted output, not needed) per microbatch, ~2.3 ms x 20,060 microbatches.
+  Needs a GPU timing of RankedCandidates.build at t = 1,024 / 2,048 / 4,096 before trusting this point's time.
+
 Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
 1.7% of time (~15 s, the high end of the 3-16 s estimate). It matches m = 0.10's loss (+0.0240) while
 saving more time (-6.24% vs -5.40%): ~0.0038 loss per 1% time, against ~0.005 before. Still 12x the
