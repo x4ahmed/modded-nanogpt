@@ -309,7 +309,8 @@ this pair's faster baseline (833.6 vs 847.2 s, session drift). ~0.0020 loss per 
 - Time: NOT a builder overhead. Per-window step times (ms/step, from the console logs) show the t = 4,096
   candidate as fast as or faster than the t = 1,024 candidate in 11 of 12 windows; only steps 900-1000
   jump to 1,489.6 ms/step (neighbours ~950), ~54 s in one window, which is the whole regression. Its own
-  baseline shows no jump there. Cause unknown: node interference or a one-off stall. Without that window
+  baseline shows no jump there. The log narrows it to steps 926-950: 76.4 s for 25 steps (~24 s
+  normally), a ~52 s stall with no warning lines. Cause unknown: node interference or a one-off stall. Without that window
   the candidate is ~787 s, about -5.5% against its baseline (estimate, not a measurement).
 
 Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
