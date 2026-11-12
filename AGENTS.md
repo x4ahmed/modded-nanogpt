@@ -42,10 +42,8 @@
 - RANKED SWEEP (RTX_VOCAB_PRUNE_MASS=m: microbatch targets + most frequent ids so far, GPU-built, width
   min(record, ids covering 1-m), floor 6,144). RESULT 2026-11-11, seed-999 pairs at 74cf685 (loss / time):
   m=0.15 +0.5885 / -8.46%; 0.10 +0.5973 / -5.36%; 0.05 +0.5498 / -3.34%; 0.01 +0.3577 / -1.70%.
-  Loss is wrecked at every mass, even 0.01 (record widths on 93% of steps): ranked fill means ids
-  outside the set are never negatives, so their logits stay high and steal probability at validation.
-  m=0.01 still saved 14.7 s with a 1-5 s width ceiling: ~10 s of the gain is building candidates on
-  the GPU instead of the host builder (port-only; user: no time on port-only gains, 2026-11-11).
+  Loss wrecked at every mass: ids outside the set are never negatives, so their logits stay high.
+  ~10 s of the time gain is GPU-side set building (port-only; user: no port-only gains, 2026-11-11).
 - STRATIFIED FIX (user, 2026-11-11): RTX_VOCAB_PRUNE_TAIL=t with a mass. RESULTS t=1024, seed-999 pairs
   at 2bf3d65 (loss / time): m=0.20 +0.0386 / -7.95%; 0.15 +0.0340 / -6.79%; 0.10 +0.0240 / -5.40%.
   All 12-19x the bar; ~0.005 loss per 1% time. EXACT END (RTX_VOCAB_PRUNE_EXACT_END=1, full softmax on
