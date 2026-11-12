@@ -50,7 +50,7 @@
   1107-1193, 2411e4a): m=0.20 t=1024 +0.0238 / -6.24% (38% of the gap gone; rest is steps 0-1106).
   Exact end + t=2048 (width 8,192): +0.0093 / -4.60% (candidate 795.3 s ~ t=1024's; baseline drifted).
   Tail only m=0.20 t=4096 (width 10,240): +0.0123 / +0.94%. Loss -68% vs t=1024. Time: one ~54 s spike
-  in steps 900-1000 (cause unknown); other windows match t=1024, so ~-5.5% without it (docs "Tail only").
+  in steps 926-950; user assumes node interference, so ~-5.5% (docs "Tail only"). Proposed next: xe + t=4096.
   Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
   estimate). Weighted CE kernel = record source + 4 text swaps (portable/weighted_ce.py).
 
