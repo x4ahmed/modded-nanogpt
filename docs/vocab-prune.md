@@ -352,11 +352,15 @@ early pruning, and late-only is already a win. The mirror run is `RTX_VOCAB_PRUN
 | Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
 | --- | --- | --- | --- | --- |
 | m 0.20, t 2048, exact end, pruned only on steps 681-1106 | 3.295245 / 836.518 | 3.298714 / 804.023 | +0.0035 | -32.5 s (-3.89%) |
+| same, pruned only on steps 965-1106 (2026-11-14) | 3.294930 / 833.502 | 3.296453 / 817.536 | +0.0015 | -16.0 s (-1.92%) |
 
 - Against pruning all sampled steps (+0.0093 / -38.3 s): the gap falls 63% and the run keeps 85% of
   the time, as estimated. Pruning steps 0-680 cost ~0.006 loss for ~6 s; it is the worst trade and is dropped.
 - The late steps, where most of the time is, cost only +0.0035: ~0.0009 loss per 1% time (was ~0.0020).
   Best trade so far; still 1.7x the 0.002 bar, with same-seed noise ~0.001.
+- Steps 965-1106 alone (record width 24,576 -> 8,192): +0.0015 / -16.0 s, the first run inside the
+  0.002 bar (one seed; noise ~0.001). It saves ~16 s, a little under the ~19 s estimate. By subtraction
+  steps 681-964 would cost ~+0.002 for ~16.5 s; that difference is within noise, so the 681-964 pair decides.
 - Why early pruning hurts (not tested): the ranking starts from zero counts, and stages 0-1 carry the
   multi-token and prefix targets, whose coverage our sets change.
 
