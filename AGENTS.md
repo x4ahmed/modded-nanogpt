@@ -51,8 +51,8 @@
   Tail only m=0.20 t=4096 (width 10,240): +0.0123 / +0.94%. Loss -68% vs t=1024. Time: one ~54 s spike
   in steps 926-950; user assumes node interference, so ~-5.5% (docs "Tail only").
   Exact end + t=4096 (2026-11-13): +0.0083 / -3.27%. Only 0.001 better than t=2048: a ~+0.008 floor
-  remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP, built 2026-11-13, not yet run): prunes
-  only from <= step < until, the record elsewhere. First pair: xe t=2048 from 681 (docs "Stage gate").
+  remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP, 9d31393: prune only from <= step < until,
+  the record elsewhere). xe t=2048 from 681: +0.0035 / -3.89% = BEST. Pruning steps 0-680 cost ~0.006 for ~6 s.
   Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
 
 ## Commands
@@ -87,7 +87,7 @@
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion, 2026-11-05): AttnRes init (done), vocabulary pruning (this branch), mHC (not
   started). Notion "Ideas vs Results" Phase 2 scoreboard: rows 1-2 AttnRes, 3-6 ranked, 7-9 stratified,
-  10-11 exact end, 12 tail 4096, 13 xe + t4096 (2026-11-13). Idea notes: one short Setup / Result / Takeaway block per row group.
+  10-11 exact end, 12 tail 4096, 13 xe + t4096, 14 stage gate. Idea notes: one short Setup / Result / Takeaway block per row group.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging

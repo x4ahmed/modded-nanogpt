@@ -5,7 +5,7 @@ check how often each token appears in the training data and drop the tokens that
 Status: ranked sweep run 2026-11-11: every mass wrecks the loss (results at the end of "Ranked pruning
 sweep"). Its fix, stratified pruning (last section), ran at m = 0.20 / 0.15 / 0.10 (t = 1,024): loss
 +0.024 to +0.039, time -5.4% to -8.0%; none meets the 0.002 bar. Best so far (2026-11-13): exact end +
-t = 2,048 (+0.0093 / -4.60%) and + t = 4,096 (+0.0083 / -3.27%). Exact pruning (mass 0) was never run.
+t = 2,048 pruned only on steps 681-1106 (stage gate): +0.0035 / -3.89%. Exact pruning (mass 0) was never run.
 
 ## Where the vocabulary still costs time
 
@@ -346,6 +346,19 @@ python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from6
 
 Late only (from 681) keeps ~32 of the 38 s. If its gap is ~+0.008, the damage is late; if ~0, it is the
 early pruning, and late-only is already a win. The mirror run is `RTX_VOCAB_PRUNE_UNTIL_STEP=681`.
+
+### Stage-gate result (2026-11-13, seed 999, commit 9d31393)
+
+| Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| m 0.20, t 2048, exact end, pruned only on steps 681-1106 | 3.295245 / 836.518 | 3.298714 / 804.023 | +0.0035 | -32.5 s (-3.89%) |
+
+- Against pruning all sampled steps (+0.0093 / -38.3 s): the gap falls 63% and the run keeps 85% of
+  the time, as estimated. Pruning steps 0-680 cost ~0.006 loss for ~6 s; it is the worst trade and is dropped.
+- The late steps, where most of the time is, cost only +0.0035: ~0.0009 loss per 1% time (was ~0.0020).
+  Best trade so far; still 1.7x the 0.002 bar, with same-seed noise ~0.001.
+- Why early pruning hurts (not tested): the ranking starts from zero counts, and stages 0-1 carry the
+  multi-token and prefix targets, whose coverage our sets change.
 
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
