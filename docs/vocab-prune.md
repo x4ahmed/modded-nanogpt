@@ -4,7 +4,8 @@ Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). I
 check how often each token appears in the training data and drop the tokens that are not needed.
 Status: ranked sweep run 2026-11-11: every mass wrecks the loss (results at the end of "Ranked pruning
 sweep"). Its fix, stratified pruning (last section), ran at m = 0.20 / 0.15 / 0.10 (t = 1,024): loss
-+0.024 to +0.039, time -5.4% to -8.0%; none meets the 0.002 bar. Exact pruning (mass 0) was never run.
++0.024 to +0.039, time -5.4% to -8.0%; none meets the 0.002 bar. Best so far (2026-11-13): exact end +
+t = 2,048 (+0.0093 / -4.60%) and + t = 4,096 (+0.0083 / -3.27%). Exact pruning (mass 0) was never run.
 
 ## Where the vocabulary still costs time
 
@@ -312,6 +313,19 @@ this pair's faster baseline (833.6 vs 847.2 s, session drift). ~0.0020 loss per 
   baseline shows no jump there. The log narrows it to steps 926-950: 76.4 s for 25 steps (~24 s
   normally), a ~52 s stall with no warning lines. Cause unknown: node interference or a one-off stall. Without that window
   the candidate is ~787 s, about -5.5% against its baseline (estimate, not a measurement).
+
+### Exact end + t = 4,096 (2026-11-13, seed 999, cluster HEAD 9d3f78f = same code as 2411e4a+)
+
+| Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| m 0.20, t 4096, exact end (width 10,240) | 3.294733 / 850.280 | 3.303053 / 822.519 | +0.0083 | -27.8 s (-3.27%) |
+
+- Loss: only 0.001 better than exact end + t = 2,048 (+0.0093), about same-seed noise. The ~1/t
+  scaling stopped: a floor near +0.008 remains that a wider uniform tail does not remove. Likely
+  sources: the 10,240 cap on stages 2-4 (the record uses 14,336 / 24,576 there) or the Z estimate itself.
+- Time: candidate 822.5 s vs 795.3 s for t = 2,048 (+27 s), but this pair's baseline is also +17 s
+  slower (850.3 vs 833.6 s), so the tail itself costs ~10 s. ~0.0025 loss per 1% time, worse than
+  t = 2,048 (~0.0020). Still 4x the 0.002 bar.
 
 Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
 1.7% of time (~15 s, the high end of the 3-16 s estimate). It matches m = 0.10's loss (+0.0240) while
