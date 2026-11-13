@@ -37,8 +37,7 @@
   the exact 328,663,040 training targets, CPU only): 49,989 of 50,257 ids occur; 268 never (mostly
   invalid-UTF-8 byte and control-char tokens), 1 validation token on them. Train counts < 10 / 100 /
   1000: 587 / 2,337 / 26,841 ids; validation hits 68 / 3,580 / 421,761. 99% coverage: 36,968 ids.
-- EXACT MODE (mass 0, default): steps 1107-1193 run over the 50,048 ids seen as targets so far (only
-  never-seen ids leave). Implemented, never run; predicted effect below pair noise.
+- EXACT MODE (mass 0, default): only never-seen ids leave, on steps 1107-1193. Never run; effect below noise.
 - RANKED SWEEP (RTX_VOCAB_PRUNE_MASS=m: microbatch targets + most frequent ids so far, GPU-built, width
   min(record, ids covering 1-m), floor 6,144). RESULT 2026-11-11, seed-999 pairs at 74cf685 (loss / time):
   m=0.15 +0.5885 / -8.46%; 0.10 +0.5973 / -5.36%; 0.05 +0.5498 / -3.34%; 0.01 +0.3577 / -1.70%.
@@ -52,7 +51,8 @@
   Tail only m=0.20 t=4096 (width 10,240): +0.0123 / +0.94%. Loss -68% vs t=1024. Time: one ~54 s spike
   in steps 926-950; user assumes node interference, so ~-5.5% (docs "Tail only").
   Exact end + t=4096 (2026-11-13): +0.0083 / -3.27%. Only 0.001 better than t=2048: a ~+0.008 floor
-  remains (suspects: 10,240 cap on stages 2-4, or the Z estimate). Next run: user's decision.
+  remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP, built 2026-11-13, not yet run): prunes
+  only from <= step < until, the record elsewhere. First pair: xe t=2048 from 681 (docs "Stage gate").
   Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
 
 ## Commands

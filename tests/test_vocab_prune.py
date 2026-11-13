@@ -349,5 +349,77 @@ class ExactEndTests(unittest.TestCase):
             sys.modules["track_1_short.portable"].config = original  # `from ... import config` reads this
 
 
+class StageGateTests(unittest.TestCase):
+    def test_counts_keep_the_record_outside_the_gate(self):
+        record = [10240, 10240, 14336, 24576, 0]
+        self.assertEqual(ranked_counts(record, 0.20, VOCAB, 2048, True, first=2), [10240, 10240, 8192, 8192, 0])
+        self.assertEqual(ranked_counts(record, 0.20, VOCAB, 2048, True, until=2), [8192, 8192, 14336, 24576, 0])
+        self.assertEqual(ranked_counts(record, 0.20, VOCAB, 2048, False, first=3), [10240, 10240, 14336, 8192, 8192])
+        self.assertEqual(ranked_counts(record, 0.20, VOCAB, 2048, True), [8192] * 4 + [0])
+
+    def gated(self, tail, **gate):
+        sampled = import_portable_sampled()
+        s = sampled.PortableSampledSoftmax(schedule(), VOCAB, 16, 512, "cpu", mass=0.20, tail=tail,
+                                           exact_end=True, **gate)
+        record = [sampled.candidate_count_at(schedule(), step) for step in range(1195)]
+        lm = torch.empty_strided((16, VOCAB), (1, 16), dtype=torch.float8_e4m3fn)
+        lm.T.copy_(torch.randn(VOCAB, 16).clamp(-4, 4).to(torch.float8_e4m3fn))
+        return s, record, lm
+
+    def test_late_gate_runs_the_record_early_and_prunes_late(self):
+        s, record, lm = self.gated(2048, first=681)
+        self.assertEqual(s.counts[:681], record[:681])
+        self.assertEqual(set(s.counts[681:1107]), {8192})
+        self.assertEqual(set(s.counts[1107:]), {0})
+        self.assertIn("stage gate: pruned only on steps 681-1193, the record's own sets elsewhere", s.describe())
+        self.assertIn(681, s.count_change_steps())
+        targets = torch.randint(0, 50_257, (512,))
+        early = s.prepare(100, targets, lm)
+        self.assertIsNone(early.col_logw)  # the record's kernel
+        self.assertEqual(early.rows.shape[0], 10240)
+        self.assertTrue(torch.equal(s.candidates[:10240][early.target_pos[:512]], targets))
+        self.assertEqual(int(s.ranked.counts.sum()), 512)  # the ranking counted the record step's targets
+        late = s.prepare(700, targets, lm)
+        self.assertEqual(int((late.col_logw > 0).sum()), 2048)
+        self.assertTrue(torch.equal(s.candidates[:8192][late.target_pos[:512]], targets))
+        self.assertIsNone(s.prepare(1150, targets, lm))
+
+    def test_early_gate_prunes_early_and_runs_the_record_late(self):
+        s, record, lm = self.gated(2048, until=681)
+        self.assertEqual(set(s.counts[:681]), {8192})
+        self.assertEqual(s.counts[681:], record[681:])
+        targets = torch.randint(0, 50_257, (512,))
+        self.assertIsNotNone(s.prepare(100, targets, lm).col_logw)
+        self.assertIsNone(s.prepare(700, targets, lm).col_logw)
+        self.assertIsNone(s.prepare(1150, targets, lm))
+
+    def test_shared_width_runs_the_record_with_zero_weights(self):
+        s, record, lm = self.gated(4096, first=681)  # pruned width 10,240 = the record's stage 0-1 width
+        targets = torch.randint(0, 50_257, (512,))
+        self.assertGreater(int((s.prepare(700, targets, lm).col_logw > 0).sum()), 0)
+        early = s.prepare(100, targets, lm)
+        self.assertTrue((early.col_logw == 0).all())
+        self.assertTrue(torch.equal(s.candidates[:10240][early.target_pos[:512]], targets))
+
+    def test_config_validates_the_gate(self):
+        name = "track_1_short.portable.config"
+        original = importlib.import_module(name)
+
+        def fresh():
+            sys.modules.pop(name, None)
+            return importlib.import_module(name)
+
+        try:
+            with patch.dict(os.environ, RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_FROM_STEP="681"):
+                self.assertEqual(fresh().VOCAB_PRUNE_FROM_STEP, 681)
+            for env in (dict(RTX_VOCAB_PRUNE_FROM_STEP="681"),
+                        dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_FROM_STEP="681", RTX_VOCAB_PRUNE_UNTIL_STEP="600")):
+                with self.subTest(env=env), patch.dict(os.environ, env), self.assertRaises(AssertionError):
+                    fresh()
+        finally:
+            sys.modules[name] = original
+            sys.modules["track_1_short.portable"].config = original
+
+
 if __name__ == "__main__":
     unittest.main()

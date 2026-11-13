@@ -17,6 +17,9 @@ RTX_VOCAB_PRUNE_MASS (portable/config.py):
   is drawn now and then, so every id is still pushed down, with the right strength on average. The CE
   kernel adds log w to the tail columns (portable/weighted_ce.py). Prefix targets outside the exact
   part are dropped, as the record drops prefix targets outside its set.
+- stage gate (RTX_VOCAB_PRUNE_FROM_STEP / RTX_VOCAB_PRUNE_UNTIL_STEP, with a mass): only steps
+  from <= step < until are pruned; every other step runs the record's own set and kernel (or its full
+  softmax). The ranking still counts every microbatch's targets. Locates where the loss gap comes from.
 
 Exact mode in detail: from step 0, every microbatch's targets are marked "seen" on the GPU (one index_fill per
 microbatch). The steps the record runs on the full softmax (1107-1193) instead normalize over a
@@ -62,11 +65,15 @@ def ranked_width(mass: float) -> int:
 
 
 def ranked_counts(record_counts: list[int], mass: float, vocab_size: int, tail: int = 0,
-                  exact_end: bool = False) -> list[int]:
+                  exact_end: bool = False, first: int = 0, until: int = 0) -> list[int]:
     """Per-step widths in ranked mode: the record's width (full softmax = vocab_size), capped at the
-    mass's exact width plus the tail. exact_end keeps the record's full-softmax steps (count 0) as they are."""
+    mass's exact width plus the tail. exact_end keeps the record's full-softmax steps (count 0) as they are.
+    Stage gate: only steps first <= step < until are pruned (until 0 = no limit); every other step keeps
+    the record's count, so it runs the record's own set (or its full softmax, count 0)."""
     width = ranked_width(mass) + tail
-    return [0 if exact_end and not count else min(count or vocab_size, width) for count in record_counts]
+    until = until or len(record_counts)
+    return [count if not first <= step < until else 0 if exact_end and not count else min(count or vocab_size, width)
+            for step, count in enumerate(record_counts)]
 
 
 def ranked_widths_in_use(record_widths, mass: float, tail: int, vocab_size: int) -> tuple[int, ...]:
@@ -130,6 +137,11 @@ class RankedCandidates:
         self.order = torch.arange(self.vocab_size, device=self.counts.device)
         self.ranked_step: int | None = None
         self.generator.manual_seed(self.TAIL_SEED)
+
+    def observe(self, targets: torch.Tensor):
+        """Stage gate: count a microbatch that runs the record's own set, so the ranking stays the
+        run's targets so far."""
+        self.counts.index_add_(0, targets, self.ones[:targets.numel()])
 
     def build(self, step: int, targets: torch.Tensor, width: int):
         """(candidates, col_logw): (width,) int64 ids ascending -- all of `targets`, the best-ranked other

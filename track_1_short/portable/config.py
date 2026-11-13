@@ -19,6 +19,8 @@ under PORTABLE and default to values sized for one 32 GB RTX 5090:
   RTX_VOCAB_PRUNE_TAIL   with a mass: t uniform, reweighted tail ids per set (stratified mode; 0 = off).
   RTX_VOCAB_PRUNE_EXACT_END  1 = with a mass, keep the record's full softmax on its full-softmax steps
                          (1107-1193); only the sampled steps are pruned.
+  RTX_VOCAB_PRUNE_FROM_STEP / RTX_VOCAB_PRUNE_UNTIL_STEP  stage gate, with a mass: prune only steps
+                         from <= step < until (defaults 0 and 0 = no limit); the other steps run the record.
 """
 import os
 
@@ -37,6 +39,8 @@ MAX_STEPS = int(os.environ["RTX_MAX_STEPS"]) if os.environ.get("RTX_MAX_STEPS") 
 VOCAB_PRUNE_MASS = float(os.environ.get("RTX_VOCAB_PRUNE_MASS") or "0")
 VOCAB_PRUNE_TAIL = int(os.environ.get("RTX_VOCAB_PRUNE_TAIL") or "0")
 VOCAB_PRUNE_EXACT_END = os.environ.get("RTX_VOCAB_PRUNE_EXACT_END", "0") == "1"
+VOCAB_PRUNE_FROM_STEP = int(os.environ.get("RTX_VOCAB_PRUNE_FROM_STEP") or "0")
+VOCAB_PRUNE_UNTIL_STEP = int(os.environ.get("RTX_VOCAB_PRUNE_UNTIL_STEP") or "0")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048
@@ -55,3 +59,7 @@ if VOCAB_PRUNE_TAIL:
 assert os.environ.get("RTX_VOCAB_PRUNE_EXACT_END", "0") in ("0", "1"), "RTX_VOCAB_PRUNE_EXACT_END: 0 or 1"
 if VOCAB_PRUNE_EXACT_END:
     assert VOCAB_PRUNE_MASS, "RTX_VOCAB_PRUNE_EXACT_END needs RTX_VOCAB_PRUNE_MASS > 0"
+if VOCAB_PRUNE_FROM_STEP or VOCAB_PRUNE_UNTIL_STEP:
+    assert VOCAB_PRUNE_MASS, "the stage gate needs RTX_VOCAB_PRUNE_MASS > 0"
+    assert VOCAB_PRUNE_FROM_STEP >= 0 and (not VOCAB_PRUNE_UNTIL_STEP or VOCAB_PRUNE_UNTIL_STEP > VOCAB_PRUNE_FROM_STEP), \
+        "stage gate: 0 <= from < until"

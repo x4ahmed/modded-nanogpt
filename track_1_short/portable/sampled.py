@@ -33,16 +33,23 @@ from track_1_short.schedule import TrainingSchedule
 class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
                  device: torch.device, mass: float | None = None, tail: int | None = None,
-                 exact_end: bool | None = None):
+                 exact_end: bool | None = None, first: int | None = None, until: int | None = None):
         self.schedule = schedule
         self.mass = rtx.VOCAB_PRUNE_MASS if mass is None else mass
         self.tail = (rtx.VOCAB_PRUNE_TAIL if tail is None else tail) if self.mass else 0
         self.exact_end = bool(rtx.VOCAB_PRUNE_EXACT_END if exact_end is None else exact_end) and bool(self.mass)
         record_counts = [candidate_count_at(schedule, s) for s in range(schedule.total_steps + 1)]
+        # Stage gate (ranked modes): only steps first <= step < until are pruned; the rest run the record.
+        self.first = (rtx.VOCAB_PRUNE_FROM_STEP if first is None else first) if self.mass else 0
+        self.until = ((rtx.VOCAB_PRUNE_UNTIL_STEP if until is None else until) if self.mass else 0) or len(record_counts)
+        self.gated = self.first > 0 or self.until < len(record_counts)
         # Exact mode: the record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
         self.pruned_steps = frozenset(s for s, count in enumerate(record_counts) if not count)
-        self.counts = (ranked_counts(record_counts, self.mass, vocab_size, self.tail, self.exact_end) if self.mass
-                       else pruned_counts(record_counts))
+        self.counts = (ranked_counts(record_counts, self.mass, vocab_size, self.tail, self.exact_end,
+                                     self.first, self.until) if self.mass else pruned_counts(record_counts))
+        # Widths the stratified (weighted) kernel runs at: only these carry column weights.
+        weighted = ({c for s, c in enumerate(self.counts) if c and self.first <= s < self.until}
+                    if self.tail else set())
         p_values = sorted(set(self.counts) - {0})
         assert p_values
         max_p = max(p_values)
@@ -58,7 +65,7 @@ class PortableSampledSoftmax:
             p: SampledLoss(rows=torch.zeros(p, model_dim, dtype=e4m3, device=device),
                            rows_t=torch.zeros(model_dim, p, dtype=e4m3, device=device),
                            target_pos=target_pos, prefix_pos=prefix_pos, vocab_pos=vocab_pos,
-                           col_logw=torch.zeros(p, dtype=torch.float32, device=device) if self.tail else None)
+                           col_logw=torch.zeros(p, dtype=torch.float32, device=device) if p in weighted else None)
             for p in p_values
         }
         self.seen = SeenTargets(vocab_size, PRUNED_WIDTH, device)
@@ -93,6 +100,9 @@ class PortableSampledSoftmax:
         if self.exact_end:
             full = sorted(self.pruned_steps & set(range(self.schedule.total_steps)))
             where = f"on sampled steps, exact_end=1: full softmax on steps {full[0]}-{full[-1]} ({len(full)} steps)"
+        if self.gated:
+            where += (f", stage gate: pruned only on steps {self.first}-{min(self.until, self.schedule.total_steps) - 1},"
+                      f" the record's own sets elsewhere")
         if self.tail:
             return (f"mode=stratified mass={self.mass} tail={self.tail} width={ranked_width(self.mass) + self.tail} "
                     f"{where} ({widths}); candidates = microbatch targets + most frequent ids so far + "
@@ -121,14 +131,23 @@ class PortableSampledSoftmax:
             targets = targets_cpu.to(self.candidates.device)
         if self.ranked is not None:
             if not self.counts[step]:
-                return None  # exact_end: the record's full softmax on this step
+                return None  # exact_end or outside the stage gate: the record's full softmax on this step
+            if not self.first <= step < self.until:
+                self.ranked.observe(targets)  # stage gate: the record's own set; the ranking keeps counting
+                return self._prepare_record(step, targets_cpu, lm_head_f8_col)
             return self._prepare_ranked(step, targets, lm_head_f8_col)
         self.seen.mark(targets)
         if step in self.pruned_steps:
             return self._prepare_pruned(step, targets_cpu, targets, lm_head_f8_col)
         self.pruned_loaded = None
+        return self._prepare_record(step, targets_cpu, lm_head_f8_col)
+
+    def _prepare_record(self, step: int, targets_cpu: Tensor, lm_head_f8_col: Tensor) -> SampledLoss:
+        """The record's set: the microbatch's targets plus stride-sweep negatives, built on the host."""
         P = self.counts[step]
         inputs = self.loss_inputs[P]
+        if inputs.col_logw is not None:
+            inputs.col_logw.zero_()  # a width shared with pruned steps: weight 1 everywhere = the record's loss
         candidates, target_pos, prefix_pos = self.builder.build(P, targets_cpu.numpy(), self.prefix_table)
         # Pageable H2D copies return once the host source is read, so the builder may reuse its scratch.
         self.candidates[:P].copy_(torch.from_numpy(candidates))

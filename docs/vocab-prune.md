@@ -327,6 +327,32 @@ this pair's faster baseline (833.6 vs 847.2 s, session drift). ~0.0020 loss per 
   slower (850.3 vs 833.6 s), so the tail itself costs ~10 s. ~0.0025 loss per 1% time, worse than
   t = 2,048 (~0.0020). Still 4x the 0.002 bar.
 
+## Stage gate (2026-11-13; built, not yet run)
+
+Where the 38 s of exact end + t = 2,048 comes from (estimate: set width x microbatches, not measured):
+steps 0-680 (record 10,240) ~6 s; 681-964 (record 14,336) ~14 s; 965-1106 (record 24,576) ~19 s. The
+record's own note says its count "has to reach full-softmax resolution before the batch taper"; pruning
+removes that ramp, and the floor does not depend on the tail size. So the late steps are the first suspect.
+
+`RTX_VOCAB_PRUNE_FROM_STEP=a` / `RTX_VOCAB_PRUNE_UNTIL_STEP=b` (with a mass) prune only steps
+a <= step < b. Every other step runs the record's own set and kernel (or its full softmax); the ranking
+still counts their targets. A width shared by both kinds of step runs the record's set with zero weights.
+
+```bash
+python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from681 \
+  --candidate-env RTX_VOCAB_PRUNE_MASS=0.20 --candidate-env RTX_VOCAB_PRUNE_TAIL=2048 \
+  --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1 --candidate-env RTX_VOCAB_PRUNE_FROM_STEP=681
+```
+
+Late only (from 681) keeps ~32 of the 38 s. If its gap is ~+0.008, the damage is late; if ~0, it is the
+early pruning, and late-only is already a win. The mirror run is `RTX_VOCAB_PRUNE_UNTIL_STEP=681`.
+
+Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
+larger exact part late; a stride sweep through the tail instead of random draws; tail weight
+(rest/t)^0.5 (smaller spikes for Adam on the tied lm_head); exact ids chosen by the model's predicted
+mass instead of frequency; full softmax on 1/32 of the rows plus the exact set on all rows; a pruned
+ending (top 36,968 ids + 1,024 tail) to buy ~5 s back.
+
 Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
 1.7% of time (~15 s, the high end of the 3-16 s estimate). It matches m = 0.10's loss (+0.0240) while
 saving more time (-6.24% vs -5.40%): ~0.0038 loss per 1% time, against ~0.005 before. Still 12x the
