@@ -53,8 +53,7 @@
   in steps 926-950; user assumes node interference, so ~-5.5% (docs "Tail only").
   Exact end + t=4096 (2026-11-13): +0.0083 / -3.27%. Only 0.001 better than t=2048: a ~+0.008 floor
   remains (suspects: 10,240 cap on stages 2-4, or the Z estimate). Next run: user's decision.
-  Set = targets + best-ranked ids + t uniform draws from all other ids weighted rest/t (unbiased Z
-  estimate). Weighted CE kernel = record source + 4 text swaps (portable/weighted_ce.py).
+  Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
