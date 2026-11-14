@@ -40,9 +40,8 @@
 - EXACT MODE (mass 0, default): only never-seen ids leave, on steps 1107-1193. Never run; effect below noise.
 - RANKED SWEEP (RTX_VOCAB_PRUNE_MASS=m: microbatch targets + most frequent ids so far, GPU-built, width
   min(record, ids covering 1-m), floor 6,144). RESULT 2026-11-11, seed-999 pairs at 74cf685 (loss / time):
-  m=0.15 +0.5885 / -8.46%; 0.10 +0.5973 / -5.36%; 0.05 +0.5498 / -3.34%; 0.01 +0.3577 / -1.70%.
-  Loss wrecked at every mass: ids outside the set are never negatives, so their logits stay high.
-  ~10 s of the time gain is GPU-side set building (port-only; user: no port-only gains, 2026-11-11).
+  m=0.15 +0.5885 / -8.46%; 0.10 +0.5973 / -5.36%; 0.05 +0.5498 / -3.34%; 0.01 +0.3577 / -1.70%. Loss wrecked:
+  ids outside the set are never negatives. ~10 s of the gain is GPU-side set building (port-only; user: none).
 - STRATIFIED FIX (user, 2026-11-11): RTX_VOCAB_PRUNE_TAIL=t with a mass. RESULTS t=1024, seed-999 pairs
   at 2bf3d65 (loss / time): m=0.20 +0.0386 / -7.95%; 0.15 +0.0340 / -6.79%; 0.10 +0.0240 / -5.40%.
   All 12-19x the bar; ~0.005 loss per 1% time. EXACT END (RTX_VOCAB_PRUNE_EXACT_END=1, full softmax on
@@ -53,8 +52,9 @@
   ~+0.008 floor remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP: prune only from <= step < until,
   the record elsewhere), xe t=2048: 681-1106 +0.0035 / -3.89%; 965-1106 +0.0015 / -1.92%; 681-964 +0.0016 /
   -1.64% (each block alone inside the bar; they add up). Steps 0-680 stay the record (~0.006 for ~6 s).
-  PER-STAGE MASS (RTX_VOCAB_PRUNE_SWITCH=step:mass:tail, built 2026-11-14, not yet run): first pair from 681
-  + switch 965:0.10:2048 (width 13,184). After it: user's candidate, a pruned ending with an estimated normalizer.
+  PER-STAGE MASS (RTX_VOCAB_PRUNE_SWITCH=step:mass:tail, 146e59f): from 681 + switch 965:0.10:2048 (width 13,184)
+  = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever (suspects:
+  tail weight ~20x, random draws). Parked: user's candidate, a pruned ending with an estimated normalizer.
   Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
 
 ## Commands
@@ -87,7 +87,7 @@
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion 2026-11-05): AttnRes init (done), vocab pruning (this branch), mHC (not started).
-  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate; notes = Setup / Result / Takeaway.
+  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass; notes = Setup / Result / Takeaway.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging

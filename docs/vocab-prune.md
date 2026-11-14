@@ -369,7 +369,7 @@ early pruning, and late-only is already a win. The mirror run is `RTX_VOCAB_PRUN
 - Why early pruning hurts (not tested): the ranking starts from zero counts, and stages 0-1 carry the
   multi-token and prefix targets, whose coverage our sets change.
 
-## Per-stage mass (2026-11-14; built, not yet run)
+## Per-stage mass (2026-11-14; result at the end)
 
 `RTX_VOCAB_PRUNE_SWITCH="step:mass:tail[,step:mass:tail...]"` (stratified mode): from each step on, that
 mass and tail replace the run's. Steps 0-680 stay the record (stage gate from 681). First pair: keep
@@ -386,6 +386,19 @@ python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from6
 Estimate: ~13.7 s (681-964, measured) + ~11 s (965-1106 at 13,184 instead of 8,192) = ~25 s (-3.0%).
 It tests whether a wider exact part lowers the ~0.0015 that the 965-1106 block costs at 8,192. Compare
 with both blocks at 8,192: +0.0035 / -32.5 s. Differences near 0.001 need more seeds to trust.
+
+### Per-stage mass result (2026-11-14, seed 999, commit 146e59f)
+
+| Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| 681-964 at m 0.20 (8,192); 965-1106 at m 0.10 (13,184); t 2048, exact end | 3.295579 / 832.621 | 3.298912 / 807.741 | +0.0033 | -24.9 s (-2.99%) |
+
+- Time as estimated (~25 s). Loss +0.0033 is the same as both blocks at 8,192 (+0.0035) within noise:
+  the wider exact part bought nothing and gave back 7.6 s. The exact part's width is not the lever.
+- Consistent with the gate runs: a block costs ~0.0015 whatever its width. What did not change here is the
+  tail: 2,048 draws at weight ~19-21x in every pruned set. So the remaining suspects are the tail's
+  weight spikes (Adam on the tied lm_head) and its random draws, not the set size.
+- Both blocks at 8,192 (+0.0035 / -3.89%) stays the best two-block setting.
 
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
