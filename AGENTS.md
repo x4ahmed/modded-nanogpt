@@ -54,16 +54,16 @@
   -1.64% (each block alone inside the bar; they add up). Steps 0-680 stay the record (~0.006 for ~6 s).
   PER-STAGE MASS (RTX_VOCAB_PRUNE_SWITCH=step:mass:tail, 146e59f): from 681 + switch 965:0.10:2048 (width 13,184)
   = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever.
-  TAIL POWER (RTX_VOCAB_PRUNE_TAIL_POWER=b: tail weight (rest/t)^b, built 2026-11-14, not yet run): first pair
-  b=0.5 from 681. Parked: frequency-weighted tail draw; user's pruned ending with an estimated normalizer.
+  TAIL POWER (RTX_VOCAB_PRUNE_TAIL_POWER=b: tail weight (rest/t)^b, 5607f34): b=0.5 from 681 = +0.0065 / -3.51%,
+  worse than b=1 (+0.0035 = BEST two-block): keep the unbiased weight. Parked (unbiased only): stride sweep,
+  frequency-weighted tail draw; user's pruned ending with an estimated normalizer.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
   short report and CENSUS_COMPLETE dir=logs/token-census/<UTC> (counts.npz, summary.json).
 - Pair per point: python -u tools/run_pair.py --seeds 999 --label <label> --candidate-env RTX_VOCAB_PRUNE_MASS=<m>
   --candidate-env RTX_VOCAB_PRUNE_TAIL=<t> ... (knobs reach the gate + candidate only); full commands in docs/vocab-prune.md.
-- GPU smoke: python -u tests/check_rtx5090.py --seed 999.
-- CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
+- GPU smoke: python -u tests/check_rtx5090.py --seed 999. CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 
 ## Frozen local settings
 - One RTX 5090 (SM120, 32 GB); PORTABLE=1.
@@ -87,7 +87,7 @@
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion 2026-11-05): AttnRes init (done), vocab pruning (this branch), mHC (not started).
-  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass; notes = Setup / Result / Takeaway.
+  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass, 18 tail power; notes = Setup / Result / Takeaway.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging
