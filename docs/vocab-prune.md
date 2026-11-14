@@ -493,6 +493,34 @@ Mean loss / time, baseline -> candidate: 681-1106 sweep 3.29452 / 864.6 s -> 3.2
 - 965-1106: every seed is inside the bar (largest +0.0015), mean +0.0010, for a steady 2.1% saving.
   The loss is still worse on all five seeds, so it is a small real cost, not noise.
 
+### Controls before an 8xH100 test of 965-1106 (2026-11-14; built, not yet run)
+
+Two things could erase a 2.1% gain there; both are measured on the 5090 first.
+
+1. Fewer steps. The record could buy time by training less. Control: the record's own schedule, rescaled
+   by its knob NUM_SCHEDULED_ITERATIONS=1096 (default 1122; total 1168 updates instead of 1194, about
+   2% less time), no pruning. The pruning code is switched off with a gate that never fires
+   (FROM_STEP=1194), so every step runs the record's loss. If this loses clearly more than +0.0010 for
+   the same time, pruning 965-1106 beats cutting steps. `tools/run_pair.py` now accepts
+   NUM_SCHEDULED_ITERATIONS in `--candidate-env` and expects 1194 + n - 1122 updates from that arm.
+2. Set building. Pruned steps build their sets on the GPU; the record's sets are built on the CPU and
+   uploaded, a cost of this port. Control: steps 965-1106 at the record's own width (24,576) and kernel,
+   but built on the GPU (ranked mode, m = 0.01, no tail). Its time saving is the builder's share G;
+   the transferable saving of 965-1106 is about 18.3 s - G. Ignore this control's loss (ranked fill).
+
+Three paired seeds each (pair time deltas vary ~1.4 s SD between seeds):
+
+```bash
+source ~/venvs/nanogpt/bin/activate && cd ~/speed-run/modded-nanogpt && git pull --ff-only origin experiment/vocab-prune
+python -u tools/run_pair.py --seeds 999 1000 1001 --label vocab-prune-control-steps1096 \
+  --candidate-env NUM_SCHEDULED_ITERATIONS=1096 --candidate-env RTX_VOCAB_PRUNE_MASS=0.20 \
+  --candidate-env RTX_VOCAB_PRUNE_TAIL=2048 --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1 \
+  --candidate-env RTX_VOCAB_PRUNE_FROM_STEP=1194
+python -u tools/run_pair.py --seeds 999 1000 1001 --label vocab-prune-control-gpubuild-from965 \
+  --candidate-env RTX_VOCAB_PRUNE_MASS=0.01 --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1 \
+  --candidate-env RTX_VOCAB_PRUNE_FROM_STEP=965
+```
+
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
 (rest/t)^0.5 (smaller spikes for Adam on the tied lm_head); exact ids chosen by the model's predicted

@@ -14,6 +14,8 @@ on the clock; a failed upload keeps the local results and prints a retry command
 
 --candidate-env KEY=VALUE (repeatable, RTX_* only) sets a knob for the gates and the candidate arm only,
 never the baseline: e.g. RTX_VOCAB_PRUNE_MASS=0.05 for one point of a sweep (give each point a --label).
+The one other key allowed is NUM_SCHEDULED_ITERATIONS=<n> (default 1122): a fewer-steps control, the
+record's own rescaled schedule on the candidate arm, which must then finish 1194 + n - 1122 updates.
 """
 import argparse
 from datetime import datetime, timezone
@@ -30,6 +32,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "baseline"
 BASELINE_COMMIT = "5be1ba0ca09293a007997cdce51c036bca3e89ae"
 FULL_UPDATES = 1194
+FULL_SCHEDULED = 1122  # NUM_SCHEDULED_ITERATIONS of the full run; the other 72 updates do not scale
+SCHEDULED = "NUM_SCHEDULED_ITERATIONS"
 # Gates on the candidate checkout before any training; "{seed}" becomes the first seed.
 GATES = (("tests/check_rtx5090.py", "--seed", "{seed}"),)
 UPLOADER = "tools/upload_wandb.py"
@@ -70,7 +74,12 @@ def run_env(seed):
     return env
 
 
-def read_result(log):
+def expected_updates(env):
+    """Optimizer updates a complete run with this environment makes."""
+    return FULL_UPDATES + int(env.get(SCHEDULED, FULL_SCHEDULED)) - FULL_SCHEDULED
+
+
+def read_result(log, updates=FULL_UPDATES):
     text = log.read_text(errors="replace")
     matches = re.findall(r"final_val_loss=([\d.eE+-]+) training_time_ms=([\d.eE+-]+)"
                          r"(?: peak_memory_allocated=([\d.]+) GiB)?", text)
@@ -80,8 +89,8 @@ def read_result(log):
     if not math.isfinite(loss) or not math.isfinite(time_ms) or time_ms <= 0:
         raise RuntimeError(f"Invalid training result in {log}")
     # A completed short run must never masquerade as a full paired result.
-    if not re.search(rf"step:{FULL_UPDATES}/{FULL_UPDATES} val_loss:", text):
-        raise RuntimeError(f"Missing full {FULL_UPDATES}-update validation in {log}")
+    if not re.search(rf"step:{updates}/{updates} val_loss:", text):
+        raise RuntimeError(f"Missing full {updates}-update validation in {log}")
     result = dict(final_val_loss=loss, training_seconds=time_ms / 1000)
     if matches[0][2]:
         result["peak_allocated_gib"] = float(matches[0][2])
@@ -101,7 +110,7 @@ def run_arm(branch, commit, seed, env):
     if len(new_logs) != 1:
         raise RuntimeError(f"Expected one console log, found {len(new_logs)}; do not train concurrently.")
     log = new_logs.pop()
-    return dict(branch=branch, commit=commit, seed=seed, console_log=str(log.relative_to(ROOT)), **read_result(log))
+    return dict(branch=branch, commit=commit, seed=seed, console_log=str(log.relative_to(ROOT)), **read_result(log, expected_updates(env)))
 
 
 def paired_deltas(baseline, candidate):
@@ -118,8 +127,12 @@ def main():
                         help="RTX_* setting for the gates and the candidate arm only (repeatable).")
     args = parser.parse_args()
     candidate_env = dict(item.split("=", 1) for item in args.candidate_env if "=" in item)
-    if len(candidate_env) != len(args.candidate_env) or not all(k.startswith("RTX_") for k in candidate_env):
-        parser.error("--candidate-env takes RTX_KEY=VALUE")
+    if len(candidate_env) != len(args.candidate_env) or not all(
+            k.startswith("RTX_") or k == SCHEDULED for k in candidate_env):
+        parser.error(f"--candidate-env takes RTX_KEY=VALUE or {SCHEDULED}=<n>")
+    if SCHEDULED in candidate_env and not (candidate_env[SCHEDULED].isdigit()
+                                           and 0 < int(candidate_env[SCHEDULED]) <= FULL_SCHEDULED):
+        parser.error(f"{SCHEDULED}: an integer from 1 to {FULL_SCHEDULED}")
     if len(set(args.seeds)) != len(args.seeds) or any(seed < 0 for seed in args.seeds):
         parser.error("seeds must be distinct nonnegative integers")
     experiment = git("branch", "--show-current")

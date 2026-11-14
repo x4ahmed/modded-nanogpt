@@ -165,6 +165,19 @@ class PairedRunTests(unittest.TestCase):
             log.write_text("step:1194/1194 val_loss:3.294980\nfinal_val_loss=3.294980 training_time_ms=825500")
             self.assertEqual(pair.read_result(log), dict(final_val_loss=3.294980, training_seconds=825.5))
 
+    def test_fewer_steps_control_expects_its_own_update_count(self):
+        self.assertEqual(pair.expected_updates({}), 1194)
+        self.assertEqual(pair.expected_updates({"NUM_SCHEDULED_ITERATIONS": "1096"}), 1168)
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "console.txt"
+            log.write_text("step:1168/1168 val_loss:3.296\nfinal_val_loss=3.296 training_time_ms=840000")
+            with self.assertRaises(RuntimeError):
+                pair.read_result(log)  # a short run never passes as a full one
+            self.assertEqual(pair.read_result(log, 1168), dict(final_val_loss=3.296, training_seconds=840.0))
+            log.write_text("step:1194/1194 val_loss:3.295\nfinal_val_loss=3.295 training_time_ms=860000")
+            with self.assertRaises(RuntimeError):
+                pair.read_result(log, 1168)  # the knob did not reach the run
+
     def test_deltas_use_the_new_pair(self):
         result = pair.paired_deltas(dict(final_val_loss=3.295, training_seconds=825),
                                     dict(final_val_loss=3.294, training_seconds=820))
