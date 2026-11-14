@@ -116,6 +116,24 @@ class CensusTests(unittest.TestCase):
         summary = census.distinct_summary(distinct)["0"]
         self.assertEqual((summary["max"], summary["microbatches"]), (max(want_distinct), len(want_distinct)))
 
+    def test_rank_slicing_cuts_each_step_into_equal_larger_slices(self):
+        rng = np.random.default_rng(3)
+        with tempfile.TemporaryDirectory() as folder:
+            files = []
+            for i in range(8):
+                files.append(Path(folder) / f"train_{i:06d}.bin")
+                write_shard(files[-1], synthetic_tokens(rng, 12))
+            schedule = FakeSchedule([(1024, 300), (2048, 300)])
+            counts, _, by_rank = census.replay_training(files, schedule, 512, ranks=2)
+            _, _, by_microbatch = census.replay_training(files, schedule, 512)
+        total = sum(schedule.lookup(s)[0].batch_size for s in range(schedule.total_steps))
+        self.assertEqual(counts["targets"].sum(), total)
+        for stage in by_rank:
+            steps = sum(1 for s in range(schedule.total_steps) if census.stage_index(schedule, s) == stage)
+            self.assertEqual(len(by_rank[stage]), 2 * steps)  # two slices per step, whatever the batch
+            # A larger slice holds at least as many distinct targets as the average small one.
+            self.assertGreater(np.mean(by_rank[stage]), np.mean(by_microbatch[stage]))
+
     def test_out_of_data_and_bad_shards_fail_loudly(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "train.bin"

@@ -508,7 +508,14 @@ Two things could erase a 2.1% gain there; both are measured on the 5090 first.
    but built on the GPU (ranked mode, m = 0.01, no tail). Its time saving is the builder's share G;
    the transferable saving of 965-1106 is about 18.3 s - G. Ignore this control's loss (ranked fill).
 
-Three paired seeds each (pair time deltas vary ~1.4 s SD between seeds):
+3. Room in the set (CPU only, no training). On 8 GPUs each rank's slice in steps 681-1106 is 49,152
+   tokens, 3x the port's 16,384-token microbatch, so it holds more distinct targets, and every target
+   must be a candidate. The port's maximum is 5,292 per microbatch; the 8,192-wide set has 6,144 exact
+   slots. `python -u tools/token_census.py --ranks 8` replays the record's slicing and prints the
+   distinct targets per rank slice by stage. Stage 2's maximum must stay under 6,144 for the same width
+   to fit on 8 GPUs; otherwise the set must be wider there and the saving shrinks.
+
+Controls 1 and 2, three paired seeds each (pair time deltas vary ~1.4 s SD between seeds):
 
 ```bash
 source ~/venvs/nanogpt/bin/activate && cd ~/speed-run/modded-nanogpt && git pull --ff-only origin experiment/vocab-prune

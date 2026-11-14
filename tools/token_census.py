@@ -13,6 +13,10 @@ It also records each microbatch's number of distinct targets, per stage: the flo
 width, since every target must be a candidate. Validation counts measure the risk of a train-derived
 choice only; never pick tokens from them.
 
+--ranks 8 replays the record's own 8-GPU slicing instead: per step, 8 slices of batch_size / 8 tokens,
+one per rank (16,384 / 32,768 / 49,152 tokens in stages 0 / 1 / 2). Its distinct-target counts say
+whether a candidate width sized on the port's 16,384-token microbatches still fits on 8 GPUs.
+
 CPU only: numpy, plus torch for the schedule; no GPU and no training. Writes
 logs/token-census/<UTC>/counts.npz and summary.json; prints CENSUS_COMPLETE.
 """
@@ -85,19 +89,21 @@ def stage_index(schedule, step):
     return next(i for i, (_, end) in enumerate(schedule.boundaries) if step < end)
 
 
-def replay_training(files, schedule, microbatch_tokens, steps=None):
+def replay_training(files, schedule, microbatch_tokens, steps=None, ranks=0):
     """Per-id counts of the training targets and inputs (targets also split at FULL_SOFTMAX_START), and
-    per stage index the list of each microbatch's distinct-target count."""
+    per stage index the list of each microbatch's distinct-target count. ranks > 0: per step, that many
+    slices of batch_size / ranks tokens (the record's multi-GPU slicing) instead of fixed microbatches."""
     counts = {k: np.zeros(PADDED_VOCAB, np.int64) for k in ("targets", "inputs", "targets_full_softmax")}
     distinct, mark = {}, np.zeros(PADDED_VOCAB, dtype=bool)
     file_iter = iter(files)
     cursor, shards = ShardCursor(read_shard(next(file_iter))), 1
     for step in range(schedule.total_steps if steps is None else steps):
         stage, _ = schedule.lookup(step)
-        assert stage.batch_size % microbatch_tokens == 0
+        slice_tokens = stage.batch_size // ranks if ranks else microbatch_tokens
+        assert stage.batch_size % slice_tokens == 0
         while True:
             try:
-                slices = cursor.next_batch(stage.batch_size // microbatch_tokens, microbatch_tokens,
+                slices = cursor.next_batch(stage.batch_size // slice_tokens, slice_tokens,
                                            stage.train_max_seq_len)
                 break
             except StopIteration:
@@ -174,6 +180,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--microbatch-tokens", type=int,
                         default=int(os.environ.get("RTX_MICROBATCH_TOKENS", "16384")))
+    parser.add_argument("--ranks", type=int, default=0,
+                        help="replay the record's slicing: this many slices of batch_size / ranks per step")
     parser.add_argument("--out", type=Path, default=None, help="default: logs/token-census/<UTC>")
     cli = parser.parse_args()
     if "NUM_SCHEDULED_ITERATIONS" in os.environ:
@@ -185,13 +193,14 @@ def main():
     train_files, val_files = sorted(glob.glob(args.train_files)), sorted(glob.glob(args.val_files))
     if not train_files or not val_files:
         raise SystemExit(f"no shards at {args.train_files} / {args.val_files} (set DATA_PATH?)")
-    print(f"Replaying {schedule.total_steps} steps at {cli.microbatch_tokens} tokens per microbatch...", flush=True)
-    counts, shards, distinct = replay_training(train_files, schedule, cli.microbatch_tokens)
+    how = f"{cli.ranks} rank slices per step" if cli.ranks else f"{cli.microbatch_tokens} tokens per microbatch"
+    print(f"Replaying {schedule.total_steps} steps at {how}...", flush=True)
+    counts, shards, distinct = replay_training(train_files, schedule, cli.microbatch_tokens, ranks=cli.ranks)
     expected = sum(schedule.lookup(s)[0].batch_size for s in range(schedule.total_steps))
     assert counts["targets"].sum() == expected, (counts["targets"].sum(), expected)
     val_targets, val_inputs = count_validation(val_files, args.val_tokens)
     summary = summarize(counts["targets"], val_targets, decoder())
-    summary.update(steps=schedule.total_steps, microbatch_tokens=cli.microbatch_tokens, train_shards_read=shards,
+    summary.update(steps=schedule.total_steps, microbatch_tokens=cli.microbatch_tokens, ranks=cli.ranks, train_shards_read=shards,
                    full_softmax_target_tokens=int(counts["targets_full_softmax"].sum()),
                    distinct_full_softmax_targets=int((counts["targets_full_softmax"] > 0).sum()),
                    never_seen_as_input=int((counts["inputs"][:REAL_VOCAB] == 0).sum()),
@@ -218,7 +227,9 @@ def report(summary):
         "Ids covering the training targets: "
         + ", ".join(f"{float(q) * 100:g}% -> {k:,}" for q, k in summary["ids_for_train_coverage"].items()),
     ]
-    lines.append(f"Distinct targets per {summary['microbatch_tokens']:,}-token microbatch, by stage: " + "; ".join(
+    unit = (f"rank slice (batch / {summary['ranks']})" if summary.get("ranks")
+            else f"{summary['microbatch_tokens']:,}-token microbatch")
+    lines.append(f"Distinct targets per {unit}, by stage: " + "; ".join(
         f"{stage}: mean {d['mean']:,.0f}, p99 {d['p99']:,}, max {d['max']:,}"
         for stage, d in summary["distinct_targets_per_microbatch"].items()))
     for c in THRESHOLDS:
