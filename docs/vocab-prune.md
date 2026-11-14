@@ -472,6 +472,27 @@ uniform draw: +0.0035 / -3.89%.
   from how the tail is drawn. With the exact-part width (per-stage mass) and the weight size (power 0.5)
   also ruled out, ~0.0015 per late block looks like the cost of the stratified loss itself at these widths.
 
+### Five paired seeds (2026-11-14, seeds 999-1003, commit 18adb8d)
+
+m 0.20, t 2048, exact end. Each seed has its own fresh baseline; deltas are within the pair.
+
+| Seed | 681-1106, sweep draw: loss delta | time | 965-1106, uniform draw: loss delta | time |
+| --- | --- | --- | --- | --- |
+| 999 | +0.003838 | -29.1 s (-3.38%) | +0.000561 | -17.7 s (-2.04%) |
+| 1000 | +0.004222 | -32.0 s (-3.70%) | +0.001529 | -19.2 s (-2.22%) |
+| 1001 | +0.004046 | -35.1 s (-4.06%) | +0.001500 | -20.0 s (-2.32%) |
+| 1002 | +0.004338 | -33.0 s (-3.82%) | +0.000960 | -16.5 s (-1.91%) |
+| 1003 | +0.003377 | -32.4 s (-3.74%) | +0.000450 | -18.1 s (-2.09%) |
+| Mean +/- SD | +0.00396 +/- 0.00038 | -32.3 s (-3.74 +/- 0.24%) | +0.00100 +/- 0.00051 | -18.3 s (-2.12 +/- 0.16%) |
+
+Mean loss / time, baseline -> candidate: 681-1106 sweep 3.29452 / 864.6 s -> 3.29849 / 832.3 s;
+965-1106 3.29476 / 865.4 s -> 3.29576 / 847.1 s.
+
+- 681-1106 (sweep): the single-seed result holds. Every seed is 0.0034-0.0043 worse, about twice the
+  0.002 bar, for a steady 3.7% saving.
+- 965-1106: every seed is inside the bar (largest +0.0015), mean +0.0010, for a steady 2.1% saving.
+  The loss is still worse on all five seeds, so it is a small real cost, not noise.
+
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
 (rest/t)^0.5 (smaller spikes for Adam on the tied lm_head); exact ids chosen by the model's predicted
