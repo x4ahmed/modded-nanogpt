@@ -429,7 +429,7 @@ less rare tail ids more often with matching weights (unbiased, same GPU cost as 
 - Time -29.2 s against -32.5 s at b = 1: the code path is the same, so this is session drift.
 - What is left to try on the tail must stay unbiased: a stride sweep or a frequency-weighted draw.
 
-## Tail draw (2026-11-14; built, not yet run)
+## Tail draw (2026-11-14; results at the end)
 
 `RTX_VOCAB_PRUNE_TAIL_DRAW` chooses how the t tail ids are drawn (default `uniform`, as before):
 
@@ -461,9 +461,16 @@ uniform draw: +0.0035 / -3.89%.
 | --- | --- | --- | --- | --- |
 | m 0.20, t 2048, exact end, steps 681-1106, draw = freq (2026-11-14) | 3.294017 / 834.336 | 3.297982 / 803.366 | +0.0040 | -31.0 s (-3.71%) |
 
+| same, draw = sweep (2026-11-14) | 3.295506 / 863.698 | 3.298892 / 829.570 | +0.0034 | -34.1 s (-3.95%) |
+
 - freq: the same as the uniform draw (+0.0035 / -32.5 s) within noise, in loss and in time. Drawing
   the less rare ids more often at smaller weights does not move the gap: which tail ids are drawn, and
   their weight sizes, are not what costs the ~0.0035.
+- sweep: also the same (+0.0034 / -34.1 s; this session's baseline was ~30 s slower, the % is unchanged).
+  Visiting every tail id once per pass does not help either.
+- Three draws, one result: uniform +0.0035, freq +0.0040, sweep +0.0034. The remaining gap does not come
+  from how the tail is drawn. With the exact-part width (per-stage mass) and the weight size (power 0.5)
+  also ruled out, ~0.0015 per late block looks like the cost of the stratified loss itself at these widths.
 
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
