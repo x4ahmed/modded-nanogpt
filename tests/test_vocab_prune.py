@@ -433,6 +433,40 @@ class StageGateTests(unittest.TestCase):
         self.assertTrue(torch.allclose(late.col_logw[late.col_logw > 0], torch.tensor(expected)))
         self.assertEqual(int((s.prepare(700, targets, lm).col_logw > 0).sum()), 2048)
 
+    def test_tail_power_scales_the_log_weight(self):
+        s, record, lm = self.gated(2048, first=681, power=0.5)
+        self.assertIn("weighted rest/2048 to the power 0.5", s.describe())
+        targets = torch.randint(0, 50_257, (512,))
+        late = s.prepare(700, targets, lm)
+        self.assertEqual(int((late.col_logw > 0).sum()), 2048)
+        expected = 0.5 * float(np.log((VOCAB - 6144) / 2048))
+        self.assertTrue(torch.allclose(late.col_logw[late.col_logw > 0], torch.tensor(expected)))
+        unweighted, _, _ = self.gated(2048, first=681, power=0.0)
+        self.assertTrue((unweighted.prepare(700, targets, lm).col_logw == 0).all())
+        default, _, _ = self.gated(2048, first=681)
+        self.assertNotIn("to the power", default.describe())
+
+    def test_config_validates_the_tail_power(self):
+        name = "track_1_short.portable.config"
+        original = importlib.import_module(name)
+
+        def fresh():
+            sys.modules.pop(name, None)
+            return importlib.import_module(name)
+
+        base = dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_TAIL="2048")
+        try:
+            self.assertEqual(original.VOCAB_PRUNE_TAIL_POWER, 1.0)
+            with patch.dict(os.environ, dict(base, RTX_VOCAB_PRUNE_TAIL_POWER="0.5")):
+                self.assertEqual(fresh().VOCAB_PRUNE_TAIL_POWER, 0.5)
+            for env in (dict(base, RTX_VOCAB_PRUNE_TAIL_POWER="1.5"), dict(base, RTX_VOCAB_PRUNE_TAIL_POWER="-0.1"),
+                        dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_TAIL_POWER="0.5")):
+                with self.subTest(env=env), patch.dict(os.environ, env), self.assertRaises(AssertionError):
+                    fresh()
+        finally:
+            sys.modules[name] = original
+            sys.modules["track_1_short.portable"].config = original
+
     def test_config_validates_the_switch(self):
         name = "track_1_short.portable.config"
         original = importlib.import_module(name)

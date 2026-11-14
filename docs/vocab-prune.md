@@ -400,6 +400,24 @@ with both blocks at 8,192: +0.0035 / -32.5 s. Differences near 0.001 need more s
   weight spikes (Adam on the tied lm_head) and its random draws, not the set size.
 - Both blocks at 8,192 (+0.0035 / -3.89%) stays the best two-block setting.
 
+## Tail weight power (2026-11-14; built, not yet run)
+
+`RTX_VOCAB_PRUNE_TAIL_POWER=b` (0 to 1, default 1): a tail id weighs (rest / t) ** b. At b = 0.5 the
+weight is ~4.6x instead of ~21x. Trade: smaller gradient spikes (less noise into the network; Adam's
+scaling of the tied lm_head / embedding rows is less dominated by spikes) against bias (on pruned steps
+the tail is pushed down ~4.6x too weakly). The record's own negatives have weight 1, and the exact
+ending corrects what is left. It costs no time. It can also come out worse.
+
+```bash
+python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from681-p0.5 \
+  --candidate-env RTX_VOCAB_PRUNE_MASS=0.20 --candidate-env RTX_VOCAB_PRUNE_TAIL=2048 \
+  --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1 --candidate-env RTX_VOCAB_PRUNE_FROM_STEP=681 \
+  --candidate-env RTX_VOCAB_PRUNE_TAIL_POWER=0.5
+```
+
+Compare with the same run at b = 1: +0.0035 / -3.89%. Parked alternative (user, 2026-11-14): draw the
+less rare tail ids more often with matching weights (unbiased, same GPU cost as today's draw).
+
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
 (rest/t)^0.5 (smaller spikes for Adam on the tied lm_head); exact ids chosen by the model's predicted

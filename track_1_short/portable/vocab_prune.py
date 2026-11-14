@@ -22,6 +22,9 @@ RTX_VOCAB_PRUNE_MASS (portable/config.py):
   softmax). The ranking still counts every microbatch's targets. Locates where the loss gap comes from.
 - per-stage mass (RTX_VOCAB_PRUNE_SWITCH="step:mass:tail[,step:mass:tail...]", stratified mode): from
   each step on, that mass and tail replace the run's. Each setting's width has its own compiled kernel.
+- tail weight power (RTX_VOCAB_PRUNE_TAIL_POWER=b, default 1): each tail id weighs (rest / t) ** b.
+  b = 1 is the unbiased estimate; b < 1 trades bias (the tail is under-weighted) for smaller gradient
+  spikes; b = 0 is the record's unweighted loss on these sets.
 
 Exact mode in detail: from step 0, every microbatch's targets are marked "seen" on the GPU (one index_fill per
 microbatch). The steps the record runs on the full softmax (1107-1193) instead normalize over a
@@ -137,9 +140,10 @@ class RankedCandidates:
 
     TAIL_SEED = 20011  # the tail's own generator: the global RNG streams are never touched
 
-    def __init__(self, vocab_size: int, max_rows: int, device, tail: int = 0):
+    def __init__(self, vocab_size: int, max_rows: int, device, tail: int = 0, power: float = 1.0):
         self.vocab_size = vocab_size
         self.tail = tail
+        self.power = power  # tail weight = (rest / tail) ** power; 1 = unbiased, < 1 = smaller spikes, biased
         self.counts = torch.zeros(vocab_size, dtype=torch.int32, device=device)
         self.is_target = torch.zeros(vocab_size, dtype=torch.bool, device=device)
         self.extra = torch.zeros(vocab_size, dtype=torch.bool, device=device)
@@ -193,7 +197,7 @@ class RankedCandidates:
         selected = self.exact | self.tail_mask
         candidates = torch.argsort((~selected).to(torch.int8), stable=True)[:width]
         rest = self.vocab_size - self.exact.sum()
-        log_w = torch.log(rest.to(torch.float32) / tail)
+        log_w = torch.log(rest.to(torch.float32) / tail) * self.power
         col_logw = torch.where(self.tail_mask[candidates], log_w, torch.zeros((), device=log_w.device))
         return candidates, col_logw
 

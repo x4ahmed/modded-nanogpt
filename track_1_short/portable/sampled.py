@@ -34,7 +34,7 @@ class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
                  device: torch.device, mass: float | None = None, tail: int | None = None,
                  exact_end: bool | None = None, first: int | None = None, until: int | None = None,
-                 switches: tuple | None = None):
+                 switches: tuple | None = None, power: float | None = None):
         self.schedule = schedule
         self.mass = rtx.VOCAB_PRUNE_MASS if mass is None else mass
         self.tail = (rtx.VOCAB_PRUNE_TAIL if tail is None else tail) if self.mass else 0
@@ -74,7 +74,8 @@ class PortableSampledSoftmax:
             for p in p_values
         }
         self.seen = SeenTargets(vocab_size, PRUNED_WIDTH, device)
-        self.ranked = RankedCandidates(vocab_size, max_rows, device, self.tail) if self.mass else None
+        self.power = (rtx.VOCAB_PRUNE_TAIL_POWER if power is None else power) if self.tail else 1.0
+        self.ranked = RankedCandidates(vocab_size, max_rows, device, self.tail, self.power) if self.mass else None
         self.prefix_table_d: Tensor | None = None
         self.reset()
 
@@ -113,7 +114,8 @@ class PortableSampledSoftmax:
         if self.tail:
             return (f"mode=stratified mass={self.mass} tail={self.tail} width={ranked_width(self.mass) + self.tail} "
                     f"{where} ({widths}); candidates = microbatch targets + most frequent ids so far + "
-                    f"{self.tail} uniform tail ids weighted rest/{self.tail}")
+                    f"{self.tail} uniform tail ids weighted rest/{self.tail}"
+                    + (f" to the power {self.power}" if self.power != 1 else ""))
         return (f"mode=ranked mass={self.mass} width={ranked_width(self.mass)} {where} ({widths}); "
                 f"candidates = microbatch targets + most frequent ids so far")
 

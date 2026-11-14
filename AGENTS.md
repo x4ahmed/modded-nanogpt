@@ -53,9 +53,9 @@
   the record elsewhere), xe t=2048: 681-1106 +0.0035 / -3.89%; 965-1106 +0.0015 / -1.92%; 681-964 +0.0016 /
   -1.64% (each block alone inside the bar; they add up). Steps 0-680 stay the record (~0.006 for ~6 s).
   PER-STAGE MASS (RTX_VOCAB_PRUNE_SWITCH=step:mass:tail, 146e59f): from 681 + switch 965:0.10:2048 (width 13,184)
-  = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever (suspects:
-  tail weight ~20x, random draws). Parked: user's candidate, a pruned ending with an estimated normalizer.
-  Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
+  = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever.
+  TAIL POWER (RTX_VOCAB_PRUNE_TAIL_POWER=b: tail weight (rest/t)^b, built 2026-11-14, not yet run): first pair
+  b=0.5 from 681. Parked: frequency-weighted tail draw; user's pruned ending with an estimated normalizer.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a

@@ -23,6 +23,8 @@ under PORTABLE and default to values sized for one 32 GB RTX 5090:
                          from <= step < until (defaults 0 and 0 = no limit); the other steps run the record.
   RTX_VOCAB_PRUNE_SWITCH  per-stage mass, stratified mode: "step:mass:tail[,step:mass:tail...]"; from each
                          step on, that mass and tail replace RTX_VOCAB_PRUNE_MASS / _TAIL.
+  RTX_VOCAB_PRUNE_TAIL_POWER  b in [0, 1] (default 1): a tail id weighs (rest / tail) ** b; b < 1 = smaller
+                         gradient spikes, biased (portable/vocab_prune.py).
 """
 import os
 
@@ -56,6 +58,7 @@ def _parse_switch(text: str) -> tuple[tuple[int, float, int], ...]:
 
 
 VOCAB_PRUNE_SWITCH = _parse_switch(os.environ.get("RTX_VOCAB_PRUNE_SWITCH") or "")
+VOCAB_PRUNE_TAIL_POWER = float(os.environ.get("RTX_VOCAB_PRUNE_TAIL_POWER") or "1")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048
@@ -78,6 +81,9 @@ if VOCAB_PRUNE_FROM_STEP or VOCAB_PRUNE_UNTIL_STEP:
     assert VOCAB_PRUNE_MASS, "the stage gate needs RTX_VOCAB_PRUNE_MASS > 0"
     assert VOCAB_PRUNE_FROM_STEP >= 0 and (not VOCAB_PRUNE_UNTIL_STEP or VOCAB_PRUNE_UNTIL_STEP > VOCAB_PRUNE_FROM_STEP), \
         "stage gate: 0 <= from < until"
+if VOCAB_PRUNE_TAIL_POWER != 1:
+    assert VOCAB_PRUNE_TAIL, "RTX_VOCAB_PRUNE_TAIL_POWER needs a tail (stratified mode)"
+    assert 0 <= VOCAB_PRUNE_TAIL_POWER <= 1, "RTX_VOCAB_PRUNE_TAIL_POWER: 0 to 1"
 if VOCAB_PRUNE_SWITCH:
     assert VOCAB_PRUNE_MASS and VOCAB_PRUNE_TAIL, "RTX_VOCAB_PRUNE_SWITCH needs a mass and a tail (stratified mode)"
     _starts = [start for start, _, _ in VOCAB_PRUNE_SWITCH]
