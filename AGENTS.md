@@ -23,7 +23,7 @@
   vocabulary pruning (portable/vocab_prune.py, knob RTX_VOCAB_PRUNE_MASS); tools/token_census.py.
 - Entry: run_rtx.sh -> train_gpt_rtx.py; shared architecture: track_1_short/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; training venv: ~/venvs/nanogpt.
-- Training commands require one allocated RTX 5090; no concurrent training on that GPU.
+- Training commands require one allocated RTX 5090; no concurrent training on that GPU. User (2026-11-14): run all experiments on GPU node tujestpolin, inside tmux (survived a 10+ h batch).
 - Local CPU tests: C:/Users/Ahmed/anaconda3/python.exe (torch 2.8, CPU); plain `python` is not on PATH.
 
 ## This idea: vocabulary pruning (docs/vocab-prune.md; Notion 2026-11-05: drop unneeded tokens)
