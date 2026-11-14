@@ -370,6 +370,13 @@ larger exact part late; a stride sweep through the tail instead of random draws;
 mass instead of frequency; full softmax on 1/32 of the rows plus the exact set on all rows; a pruned
 ending (top 36,968 ids + 1,024 tail) to buy ~5 s back.
 
+Candidate kept for after the per-stage mass (user, 2026-11-14): prune the ending (steps 1107-1193, still
+50,304 columns on every step) with an estimated normalizer on top of the stratified set. Idea: a running
+average of each left-out id's contribution is added to the normalizer, and the sampled tail only corrects
+the difference (a control variate; stays unbiased, the tail still pushes left-out ids down). It removes
+the noise of which ids were drawn, not the context-dependent noise. Needs one extra kernel input (the
+correction) and one extra output (per-column contributions). Risk: the ending is where the loss must be exact.
+
 Against plain m = 0.20 (+0.0386 / -7.95%), the exact ending removes 0.0148 of the loss gap (38%) for
 1.7% of time (~15 s, the high end of the 3-16 s estimate). It matches m = 0.10's loss (+0.0240) while
 saving more time (-6.24% vs -5.40%): ~0.0038 loss per 1% time, against ~0.005 before. Still 12x the

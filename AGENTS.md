@@ -48,12 +48,12 @@
   All 12-19x the bar; ~0.005 loss per 1% time. EXACT END (RTX_VOCAB_PRUNE_EXACT_END=1, full softmax on
   1107-1193, 2411e4a): m=0.20 t=1024 +0.0238 / -6.24% (38% of the gap gone; rest is steps 0-1106).
   Exact end + t=2048 (width 8,192): +0.0093 / -4.60% (candidate 795.3 s ~ t=1024's; baseline drifted).
-  Tail only m=0.20 t=4096 (width 10,240): +0.0123 / +0.94%. Loss -68% vs t=1024. Time: one ~54 s spike
-  in steps 926-950; user assumes node interference, so ~-5.5% (docs "Tail only").
-  Exact end + t=4096 (2026-11-13): +0.0083 / -3.27%. Only 0.001 better than t=2048: a ~+0.008 floor
-  remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP, 9d31393: prune only from <= step < until,
+  Tail only m=0.20 t=4096: +0.0123 / +0.94% (one ~54 s spike in steps 926-950; user assumes node
+  interference, so ~-5.5%). Exact end + t=4096: +0.0083 / -3.27%, only 0.001 better than t=2048: a
+  ~+0.008 floor remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP, 9d31393: prune only from <= step < until,
   the record elsewhere). xe t=2048: from 681 +0.0035 / -3.89%; from 965 +0.0015 / -1.92% (inside the bar).
-  Steps 0-680 stay the record (~0.006 for ~6 s; user agreed). Pending: 681-964 only, then per-stage mass.
+  Steps 0-680 stay the record (~0.006 for ~6 s; user agreed). Pending: 681-964 only, then per-stage mass,
+  then (user's candidate) a pruned ending with an estimated normalizer (docs "Stage gate", last paragraph).
   Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
 
 ## Commands
