@@ -455,6 +455,16 @@ python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from6
 Then the same with `RTX_VOCAB_PRUNE_TAIL_DRAW=sweep` (label `...-sweep`). Compare both with the
 uniform draw: +0.0035 / -3.89%.
 
+### Tail draw results (seed 999, commit e14858e)
+
+| Run | Baseline loss / s | Candidate loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| m 0.20, t 2048, exact end, steps 681-1106, draw = freq (2026-11-14) | 3.294017 / 834.336 | 3.297982 / 803.366 | +0.0040 | -31.0 s (-3.71%) |
+
+- freq: the same as the uniform draw (+0.0035 / -32.5 s) within noise, in loss and in time. Drawing
+  the less rare ids more often at smaller weights does not move the gap: which tail ids are drawn, and
+  their weight sizes, are not what costs the ~0.0035.
+
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
 (rest/t)^0.5 (smaller spikes for Adam on the tied lm_head); exact ids chosen by the model's predicted

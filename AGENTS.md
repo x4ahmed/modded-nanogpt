@@ -56,7 +56,7 @@
   = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever.
   TAIL POWER (RTX_VOCAB_PRUNE_TAIL_POWER=b: tail weight (rest/t)^b, 5607f34): b=0.5 from 681 = +0.0065 / -3.51%,
   worse than b=1 (+0.0035 = BEST two-block): keep the unbiased weight. TAIL DRAW (RTX_VOCAB_PRUNE_TAIL_DRAW=
-  freq|sweep, built 2026-11-14, not yet run; user's order: freq, then sweep; docs "Tail draw"). Parked: user's pruned ending with an estimated normalizer.
+  freq|sweep, e14858e; docs "Tail draw"): freq from 681 = +0.0040 / -3.71%, same as uniform within noise; sweep pending. Parked: user's pruned ending with an estimated normalizer.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
@@ -87,7 +87,7 @@
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion 2026-11-05): AttnRes init (done), vocab pruning (this branch), mHC (not started).
-  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass, 18 tail power; notes = Setup / Result / Takeaway.
+  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass, 18 tail power, 19 freq draw; notes = Setup / Result / Takeaway.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging
