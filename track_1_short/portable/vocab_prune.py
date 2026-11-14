@@ -20,6 +20,8 @@ RTX_VOCAB_PRUNE_MASS (portable/config.py):
 - stage gate (RTX_VOCAB_PRUNE_FROM_STEP / RTX_VOCAB_PRUNE_UNTIL_STEP, with a mass): only steps
   from <= step < until are pruned; every other step runs the record's own set and kernel (or its full
   softmax). The ranking still counts every microbatch's targets. Locates where the loss gap comes from.
+- per-stage mass (RTX_VOCAB_PRUNE_SWITCH="step:mass:tail[,step:mass:tail...]", stratified mode): from
+  each step on, that mass and tail replace the run's. Each setting's width has its own compiled kernel.
 
 Exact mode in detail: from step 0, every microbatch's targets are marked "seen" on the GPU (one index_fill per
 microbatch). The steps the record runs on the full softmax (1107-1193) instead normalize over a
@@ -64,21 +66,38 @@ def ranked_width(mass: float) -> int:
     return max(MIN_RANKED_WIDTH, -(-kept // 128) * 128)
 
 
+def setting_at(step: int, mass: float, tail: int, switches=()) -> tuple[float, int]:
+    """(mass, tail) in force at `step`: the last switch (start, mass, tail) with start <= step, else the base."""
+    for start, switch_mass, switch_tail in switches:
+        if start <= step:
+            mass, tail = switch_mass, switch_tail
+    return mass, tail
+
+
 def ranked_counts(record_counts: list[int], mass: float, vocab_size: int, tail: int = 0,
-                  exact_end: bool = False, first: int = 0, until: int = 0) -> list[int]:
+                  exact_end: bool = False, first: int = 0, until: int = 0, switches=()) -> list[int]:
     """Per-step widths in ranked mode: the record's width (full softmax = vocab_size), capped at the
     mass's exact width plus the tail. exact_end keeps the record's full-softmax steps (count 0) as they are.
     Stage gate: only steps first <= step < until are pruned (until 0 = no limit); every other step keeps
-    the record's count, so it runs the record's own set (or its full softmax, count 0)."""
-    width = ranked_width(mass) + tail
+    the record's count, so it runs the record's own set (or its full softmax, count 0).
+    Per-stage mass: `switches` = (start, mass, tail) triples; from each start on, that mass and tail apply."""
     until = until or len(record_counts)
-    return [count if not first <= step < until else 0 if exact_end and not count else min(count or vocab_size, width)
-            for step, count in enumerate(record_counts)]
+    counts = []
+    for step, count in enumerate(record_counts):
+        if not first <= step < until:
+            counts.append(count)
+        elif exact_end and not count:
+            counts.append(0)
+        else:
+            step_mass, step_tail = setting_at(step, mass, tail, switches)
+            counts.append(min(count or vocab_size, ranked_width(step_mass) + step_tail))
+    return counts
 
 
-def ranked_widths_in_use(record_widths, mass: float, tail: int, vocab_size: int) -> tuple[int, ...]:
+def ranked_widths_in_use(record_widths, mass: float, tail: int, vocab_size: int, switches=()) -> tuple[int, ...]:
     """Every width ranked_counts can produce from these record widths (kernels compile per width)."""
-    return tuple(sorted(set(ranked_counts([*record_widths, 0], mass, vocab_size, tail))))
+    settings = [(mass, tail), *((m, t) for _, m, t in switches)]
+    return tuple(sorted({w for m, t in settings for w in ranked_counts([*record_widths, 0], m, vocab_size, t)}))
 
 
 def weighted_kernel_source(source: str) -> str:
@@ -143,10 +162,12 @@ class RankedCandidates:
         run's targets so far."""
         self.counts.index_add_(0, targets, self.ones[:targets.numel()])
 
-    def build(self, step: int, targets: torch.Tensor, width: int):
+    def build(self, step: int, targets: torch.Tensor, width: int, tail: int | None = None):
         """(candidates, col_logw): (width,) int64 ids ascending -- all of `targets`, the best-ranked other
         ids up to width - tail, and `tail` uniform draws from the rest -- and their (width,) fp32 log
-        weights (0 for exact ids, log(rest / tail) for tail ids; None without a tail)."""
+        weights (0 for exact ids, log(rest / tail) for tail ids; None without a tail). `tail` defaults to
+        the run's tail; a per-stage switch passes its own."""
+        tail = self.tail if tail is None else tail
         if self.ranked_step != step:
             self.order = torch.argsort(self.counts, descending=True, stable=True)
             self.ranked_step = step
@@ -154,7 +175,7 @@ class RankedCandidates:
         self.is_target.zero_()
         self.is_target.index_fill_(0, targets, True)
         n_targets = self.is_target.sum()
-        budget = width - self.tail
+        budget = width - tail
         # Non-targets in rank order; keep the first budget - n_targets of them.
         free = ~self.is_target[self.order]
         take = free & (torch.cumsum(free, 0) <= budget - n_targets)
@@ -162,17 +183,17 @@ class RankedCandidates:
         # More distinct targets than the exact budget cannot happen at the census floor; counted, never silent.
         self.overflow += n_targets > budget
         torch.logical_or(self.is_target, self.extra, out=self.exact)
-        if not self.tail:
+        if not tail:
             return torch.argsort((~self.exact).to(torch.int8), stable=True)[:width], None
         # Uniform draw without replacement from the ids outside the exact part: the `tail` smallest keys.
         keys = torch.rand(self.vocab_size, generator=self.generator, device=self.counts.device)
         keys.masked_fill_(self.exact, 2.0)
         self.tail_mask.zero_()
-        self.tail_mask.index_fill_(0, torch.topk(keys, self.tail, largest=False).indices, True)
+        self.tail_mask.index_fill_(0, torch.topk(keys, tail, largest=False).indices, True)
         selected = self.exact | self.tail_mask
         candidates = torch.argsort((~selected).to(torch.int8), stable=True)[:width]
         rest = self.vocab_size - self.exact.sum()
-        log_w = torch.log(rest.to(torch.float32) / self.tail)
+        log_w = torch.log(rest.to(torch.float32) / tail)
         col_logw = torch.where(self.tail_mask[candidates], log_w, torch.zeros((), device=log_w.device))
         return candidates, col_logw
 

@@ -50,18 +50,18 @@
   Exact end + t=2048 (width 8,192): +0.0093 / -4.60% (candidate 795.3 s ~ t=1024's; baseline drifted).
   Tail only m=0.20 t=4096: +0.0123 / +0.94% (one ~54 s spike in steps 926-950; user assumes node
   interference, so ~-5.5%). Exact end + t=4096: +0.0083 / -3.27%, only 0.001 better than t=2048: a
-  ~+0.008 floor remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP, 9d31393: prune only from <= step < until,
-  the record elsewhere). xe t=2048: from 681 +0.0035 / -3.89%; from 965 +0.0015 / -1.92% (inside the bar).
-  Steps 0-680 stay the record (~0.006 for ~6 s; user agreed). Pending: 681-964 only, then per-stage mass,
-  then (user's candidate) a pruned ending with an estimated normalizer (docs "Stage gate", last paragraph).
+  ~+0.008 floor remains. STAGE GATE (RTX_VOCAB_PRUNE_FROM_STEP / _UNTIL_STEP: prune only from <= step < until,
+  the record elsewhere), xe t=2048: 681-1106 +0.0035 / -3.89%; 965-1106 +0.0015 / -1.92%; 681-964 +0.0016 /
+  -1.64% (each block alone inside the bar; they add up). Steps 0-680 stay the record (~0.006 for ~6 s).
+  PER-STAGE MASS (RTX_VOCAB_PRUNE_SWITCH=step:mass:tail, built 2026-11-14, not yet run): first pair from 681
+  + switch 965:0.10:2048 (width 13,184). After it: user's candidate, a pruned ending with an estimated normalizer.
   Set = targets + best-ranked ids + t uniform draws weighted rest/t; kernel portable/weighted_ce.py.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
   short report and CENSUS_COMPLETE dir=logs/token-census/<UTC> (counts.npz, summary.json).
-- Pair per point: python -u tools/run_pair.py --seeds 999 --label vocab-prune-m<m>-t<t>
-  --candidate-env RTX_VOCAB_PRUNE_MASS=<m> --candidate-env RTX_VOCAB_PRUNE_TAIL=<t> (gate + candidate
-  only). Loop in docs/vocab-prune.md. Standalone runs self-name vocab-prune-m<m>[-t<t>]-1gpu-seed-N.
+- Pair per point: python -u tools/run_pair.py --seeds 999 --label <label> --candidate-env RTX_VOCAB_PRUNE_MASS=<m>
+  --candidate-env RTX_VOCAB_PRUNE_TAIL=<t> ... (knobs reach the gate + candidate only); full commands in docs/vocab-prune.md.
 - GPU smoke: python -u tests/check_rtx5090.py --seed 999.
 - CPU: python -m unittest discover -s tests -p 'test_*.py' -v.
 
@@ -87,7 +87,7 @@
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion 2026-11-05): AttnRes init (done), vocab pruning (this branch), mHC (not started).
-  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-15 stage gate; notes = Setup / Result / Takeaway.
+  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate; notes = Setup / Result / Takeaway.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging

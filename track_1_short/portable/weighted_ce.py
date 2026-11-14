@@ -43,7 +43,7 @@ def compile_weighted_ce_kernel(width: int):
 
 # Compiled at import (off the clock), only when a stratified run asks for them.
 WEIGHTED_CE_KERNELS = ({w: compile_weighted_ce_kernel(w) for w in ranked_widths_in_use(
-    ALL_CANDIDATE_COUNTS, rtx.VOCAB_PRUNE_MASS, rtx.VOCAB_PRUNE_TAIL, 50304)}
+    ALL_CANDIDATE_COUNTS, rtx.VOCAB_PRUNE_MASS, rtx.VOCAB_PRUNE_TAIL, 50304, rtx.VOCAB_PRUNE_SWITCH)}
     if rtx.PORTABLE and rtx.VOCAB_PRUNE_MASS and rtx.VOCAB_PRUNE_TAIL else {})
 
 

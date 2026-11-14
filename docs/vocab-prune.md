@@ -4,8 +4,9 @@ Branch: `experiment/vocab-prune`, directly from frozen `baseline` (`5be1ba0`). I
 check how often each token appears in the training data and drop the tokens that are not needed.
 Status: ranked sweep run 2026-11-11: every mass wrecks the loss (results at the end of "Ranked pruning
 sweep"). Its fix, stratified pruning (last section), ran at m = 0.20 / 0.15 / 0.10 (t = 1,024): loss
-+0.024 to +0.039, time -5.4% to -8.0%; none meets the 0.002 bar. Best so far (2026-11-13): exact end +
-t = 2,048 pruned only on steps 681-1106 (stage gate): +0.0035 / -3.89%. Exact pruning (mass 0) was never run.
++0.024 to +0.039, time -5.4% to -8.0%; none meets the 0.002 bar. Best so far (2026-11-14), exact end +
+t = 2,048 with the stage gate: steps 681-1106 +0.0035 / -3.89%; steps 965-1106 alone +0.0015 / -1.92%
+and steps 681-964 alone +0.0016 / -1.64% (each inside the 0.002 bar on one seed). Exact pruning (mass 0) was never run.
 
 ## Where the vocabulary still costs time
 
@@ -353,16 +354,38 @@ early pruning, and late-only is already a win. The mirror run is `RTX_VOCAB_PRUN
 | --- | --- | --- | --- | --- |
 | m 0.20, t 2048, exact end, pruned only on steps 681-1106 | 3.295245 / 836.518 | 3.298714 / 804.023 | +0.0035 | -32.5 s (-3.89%) |
 | same, pruned only on steps 965-1106 (2026-11-14) | 3.294930 / 833.502 | 3.296453 / 817.536 | +0.0015 | -16.0 s (-1.92%) |
+| same, pruned only on steps 681-964 (2026-11-14) | 3.294941 / 832.581 | 3.296579 / 818.928 | +0.0016 | -13.7 s (-1.64%) |
 
 - Against pruning all sampled steps (+0.0093 / -38.3 s): the gap falls 63% and the run keeps 85% of
   the time, as estimated. Pruning steps 0-680 cost ~0.006 loss for ~6 s; it is the worst trade and is dropped.
 - The late steps, where most of the time is, cost only +0.0035: ~0.0009 loss per 1% time (was ~0.0020).
   Best trade so far; still 1.7x the 0.002 bar, with same-seed noise ~0.001.
 - Steps 965-1106 alone (record width 24,576 -> 8,192): +0.0015 / -16.0 s, the first run inside the
-  0.002 bar (one seed; noise ~0.001). It saves ~16 s, a little under the ~19 s estimate. By subtraction
-  steps 681-964 would cost ~+0.002 for ~16.5 s; that difference is within noise, so the 681-964 pair decides.
+  0.002 bar (one seed; noise ~0.001). It saves ~16 s, a little under the ~19 s estimate.
+- Steps 681-964 alone (record width 14,336 -> 8,192): +0.0016 / -13.7 s, also inside the bar alone.
+- The two blocks add up: +0.0015 + 0.0016 = +0.0031 and 16.0 + 13.7 = 29.7 s, against +0.0035 and
+  32.5 s measured together. Loss per second saved is about the same in both (~0.0001), slightly better
+  in 965-1106. Each block costs ~0.0015 whatever the number of columns it removes (6,144 vs 16,384).
 - Why early pruning hurts (not tested): the ranking starts from zero counts, and stages 0-1 carry the
   multi-token and prefix targets, whose coverage our sets change.
+
+## Per-stage mass (2026-11-14; built, not yet run)
+
+`RTX_VOCAB_PRUNE_SWITCH="step:mass:tail[,step:mass:tail...]"` (stratified mode): from each step on, that
+mass and tail replace the run's. Steps 0-680 stay the record (stage gate from 681). First pair: keep
+8,192 on steps 681-964 and widen the exact part on 965-1106 to mass 0.10 (11,136 exact + 2,048 tail =
+13,184; the exact part then covers 90% of the text instead of ~85%).
+
+```bash
+python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from681-sw965-m0.10 \
+  --candidate-env RTX_VOCAB_PRUNE_MASS=0.20 --candidate-env RTX_VOCAB_PRUNE_TAIL=2048 \
+  --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1 --candidate-env RTX_VOCAB_PRUNE_FROM_STEP=681 \
+  --candidate-env RTX_VOCAB_PRUNE_SWITCH=965:0.10:2048
+```
+
+Estimate: ~13.7 s (681-964, measured) + ~11 s (965-1106 at 13,184 instead of 8,192) = ~25 s (-3.0%).
+It tests whether a wider exact part lowers the ~0.0015 that the 965-1106 block costs at 8,192. Compare
+with both blocks at 8,192: +0.0035 / -32.5 s. Differences near 0.001 need more seeds to trust.
 
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight

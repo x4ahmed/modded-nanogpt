@@ -21,6 +21,8 @@ under PORTABLE and default to values sized for one 32 GB RTX 5090:
                          (1107-1193); only the sampled steps are pruned.
   RTX_VOCAB_PRUNE_FROM_STEP / RTX_VOCAB_PRUNE_UNTIL_STEP  stage gate, with a mass: prune only steps
                          from <= step < until (defaults 0 and 0 = no limit); the other steps run the record.
+  RTX_VOCAB_PRUNE_SWITCH  per-stage mass, stratified mode: "step:mass:tail[,step:mass:tail...]"; from each
+                         step on, that mass and tail replace RTX_VOCAB_PRUNE_MASS / _TAIL.
 """
 import os
 
@@ -41,6 +43,19 @@ VOCAB_PRUNE_TAIL = int(os.environ.get("RTX_VOCAB_PRUNE_TAIL") or "0")
 VOCAB_PRUNE_EXACT_END = os.environ.get("RTX_VOCAB_PRUNE_EXACT_END", "0") == "1"
 VOCAB_PRUNE_FROM_STEP = int(os.environ.get("RTX_VOCAB_PRUNE_FROM_STEP") or "0")
 VOCAB_PRUNE_UNTIL_STEP = int(os.environ.get("RTX_VOCAB_PRUNE_UNTIL_STEP") or "0")
+
+
+def _parse_switch(text: str) -> tuple[tuple[int, float, int], ...]:
+    """RTX_VOCAB_PRUNE_SWITCH -> ((step, mass, tail), ...)."""
+    switches = []
+    for item in filter(None, text.split(",")):
+        parts = item.split(":")
+        assert len(parts) == 3, "RTX_VOCAB_PRUNE_SWITCH: step:mass:tail[,step:mass:tail...]"
+        switches.append((int(parts[0]), float(parts[1]), int(parts[2])))
+    return tuple(switches)
+
+
+VOCAB_PRUNE_SWITCH = _parse_switch(os.environ.get("RTX_VOCAB_PRUNE_SWITCH") or "")
 
 assert MICROBATCH_TOKENS % 2048 == 0, "microbatches are whole 2048-token units"
 assert NGRAM_DIVISOR >= 1 and NGRAM_DIVISOR & (NGRAM_DIVISOR - 1) == 0 and NGRAM_DIVISOR <= 2048
@@ -63,3 +78,11 @@ if VOCAB_PRUNE_FROM_STEP or VOCAB_PRUNE_UNTIL_STEP:
     assert VOCAB_PRUNE_MASS, "the stage gate needs RTX_VOCAB_PRUNE_MASS > 0"
     assert VOCAB_PRUNE_FROM_STEP >= 0 and (not VOCAB_PRUNE_UNTIL_STEP or VOCAB_PRUNE_UNTIL_STEP > VOCAB_PRUNE_FROM_STEP), \
         "stage gate: 0 <= from < until"
+if VOCAB_PRUNE_SWITCH:
+    assert VOCAB_PRUNE_MASS and VOCAB_PRUNE_TAIL, "RTX_VOCAB_PRUNE_SWITCH needs a mass and a tail (stratified mode)"
+    _starts = [start for start, _, _ in VOCAB_PRUNE_SWITCH]
+    assert _starts == sorted(set(_starts)) and _starts[0] > VOCAB_PRUNE_FROM_STEP, \
+        "switch steps: increasing, after the gate's start"
+    for _, _mass, _tail in VOCAB_PRUNE_SWITCH:
+        assert _mass in KEPT_IDS_BY_MASS, f"switch mass {_mass}: one of {sorted(KEPT_IDS_BY_MASS)}"
+        assert _tail % 128 == 0 and 128 <= _tail <= 4096, "switch tail: a multiple of 128, 128-4096"

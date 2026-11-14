@@ -24,7 +24,7 @@ from torch import Tensor
 from track_1_short.perf.kernels.transpose import transpose_copy
 from track_1_short.portable import config as rtx
 from track_1_short.portable.vocab_prune import (
-    PRUNED_WIDTH, RankedCandidates, SeenTargets, pruned_counts, ranked_counts, ranked_width,
+    PRUNED_WIDTH, RankedCandidates, SeenTargets, pruned_counts, ranked_counts, ranked_width, setting_at,
 )
 from track_1_short.sampled_softmax import CandidateBuilder, SampledLoss, _stage_index, candidate_count_at
 from track_1_short.schedule import TrainingSchedule
@@ -33,7 +33,8 @@ from track_1_short.schedule import TrainingSchedule
 class PortableSampledSoftmax:
     def __init__(self, schedule: TrainingSchedule, vocab_size: int, model_dim: int, max_rows: int,
                  device: torch.device, mass: float | None = None, tail: int | None = None,
-                 exact_end: bool | None = None, first: int | None = None, until: int | None = None):
+                 exact_end: bool | None = None, first: int | None = None, until: int | None = None,
+                 switches: tuple | None = None):
         self.schedule = schedule
         self.mass = rtx.VOCAB_PRUNE_MASS if mass is None else mass
         self.tail = (rtx.VOCAB_PRUNE_TAIL if tail is None else tail) if self.mass else 0
@@ -45,8 +46,12 @@ class PortableSampledSoftmax:
         self.gated = self.first > 0 or self.until < len(record_counts)
         # Exact mode: the record's full-softmax steps (count 0) become pruned steps at PRUNED_WIDTH.
         self.pruned_steps = frozenset(s for s, count in enumerate(record_counts) if not count)
+        # Per-stage mass (stratified mode): (start, mass, tail) switches; the tail in force at each step.
+        self.switches = tuple(rtx.VOCAB_PRUNE_SWITCH if switches is None else switches) if self.tail else ()
+        self.tails = [setting_at(s, self.mass, self.tail, self.switches)[1] for s in range(len(record_counts))]
         self.counts = (ranked_counts(record_counts, self.mass, vocab_size, self.tail, self.exact_end,
-                                     self.first, self.until) if self.mass else pruned_counts(record_counts))
+                                     self.first, self.until, self.switches) if self.mass
+                       else pruned_counts(record_counts))
         # Widths the stratified (weighted) kernel runs at: only these carry column weights.
         weighted = ({c for s, c in enumerate(self.counts) if c and self.first <= s < self.until}
                     if self.tail else set())
@@ -103,6 +108,8 @@ class PortableSampledSoftmax:
         if self.gated:
             where += (f", stage gate: pruned only on steps {self.first}-{min(self.until, self.schedule.total_steps) - 1},"
                       f" the record's own sets elsewhere")
+        for start, mass, tail in self.switches:
+            where += f", from step {start}: mass={mass} tail={tail} width={ranked_width(mass) + tail}"
         if self.tail:
             return (f"mode=stratified mass={self.mass} tail={self.tail} width={ranked_width(self.mass) + self.tail} "
                     f"{where} ({widths}); candidates = microbatch targets + most frequent ids so far + "
@@ -189,7 +196,7 @@ class PortableSampledSoftmax:
         P = self.counts[step]
         inputs = self.loss_inputs[P]
         cand = self.candidates[:P]
-        candidates, col_logw = self.ranked.build(step, targets, P)
+        candidates, col_logw = self.ranked.build(step, targets, P, self.tails[step])
         cand.copy_(candidates)
         if col_logw is not None:
             inputs.col_logw.copy_(col_logw)

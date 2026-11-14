@@ -401,6 +401,61 @@ class StageGateTests(unittest.TestCase):
         self.assertTrue((early.col_logw == 0).all())
         self.assertTrue(torch.equal(s.candidates[:10240][early.target_pos[:512]], targets))
 
+    def test_switch_changes_mass_and_tail_from_a_step(self):
+        record = [10240, 14336, 24576, 0]
+        self.assertEqual(ranked_counts(record, 0.20, VOCAB, 2048, True, first=1, switches=((2, 0.10, 2048),)),
+                         [10240, 8192, 13184, 0])
+        self.assertEqual(ranked_widths_in_use((10240, 14336, 24576), 0.20, 2048, VOCAB, ((965, 0.10, 2048),)),
+                         (8192, 10240, 13184))
+        s, record, lm = self.gated(2048, first=681, switches=((965, 0.10, 2048),))
+        self.assertEqual(s.counts[:681], record[:681])
+        self.assertEqual(set(s.counts[681:965]), {8192})
+        self.assertEqual(set(s.counts[965:1107]), {13184})
+        self.assertIn("from step 965: mass=0.1 tail=2048 width=13184", s.describe())
+        self.assertIn(965, s.count_change_steps())
+        targets = torch.randint(0, 50_257, (512,))
+        late = s.prepare(1000, targets, lm)
+        self.assertEqual(late.rows.shape[0], 13184)
+        self.assertEqual(int((late.col_logw > 0).sum()), 2048)
+        self.assertEqual(int(s.ranked.exact.sum()), 11136)
+        self.assertTrue(torch.equal(s.candidates[:13184][late.target_pos[:512]], targets))
+        mid = s.prepare(700, targets, lm)
+        self.assertEqual(mid.rows.shape[0], 8192)
+        self.assertEqual(int(s.ranked.exact.sum()), 6144)
+
+    def test_switch_can_change_only_the_tail(self):
+        s, record, lm = self.gated(2048, first=681, switches=((965, 0.20, 4096),))
+        self.assertEqual(set(s.counts[965:1107]), {10240})
+        targets = torch.randint(0, 50_257, (512,))
+        late = s.prepare(1000, targets, lm)
+        self.assertEqual(int((late.col_logw > 0).sum()), 4096)
+        expected = float(np.log((VOCAB - 6144) / 4096))
+        self.assertTrue(torch.allclose(late.col_logw[late.col_logw > 0], torch.tensor(expected)))
+        self.assertEqual(int((s.prepare(700, targets, lm).col_logw > 0).sum()), 2048)
+
+    def test_config_validates_the_switch(self):
+        name = "track_1_short.portable.config"
+        original = importlib.import_module(name)
+
+        def fresh():
+            sys.modules.pop(name, None)
+            return importlib.import_module(name)
+
+        base = dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_TAIL="2048", RTX_VOCAB_PRUNE_FROM_STEP="681")
+        try:
+            with patch.dict(os.environ, dict(base, RTX_VOCAB_PRUNE_SWITCH="965:0.10:2048")):
+                self.assertEqual(fresh().VOCAB_PRUNE_SWITCH, ((965, 0.10, 2048),))
+            for switch in ("965:0.10", "965:0.11:2048", "965:0.10:1000", "600:0.10:2048", "965:0.10:2048,800:0.15:2048"):
+                with self.subTest(switch=switch), patch.dict(os.environ, dict(base, RTX_VOCAB_PRUNE_SWITCH=switch)), \
+                        self.assertRaises(AssertionError):
+                    fresh()
+            with patch.dict(os.environ, RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_SWITCH="965:0.10:2048"), \
+                    self.assertRaises(AssertionError):
+                fresh()
+        finally:
+            sys.modules[name] = original
+            sys.modules["track_1_short.portable"].config = original
+
     def test_config_validates_the_gate(self):
         name = "track_1_short.portable.config"
         original = importlib.import_module(name)
