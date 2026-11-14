@@ -429,6 +429,32 @@ less rare tail ids more often with matching weights (unbiased, same GPU cost as 
 - Time -29.2 s against -32.5 s at b = 1: the code path is the same, so this is session drift.
 - What is left to try on the tail must stay unbiased: a stride sweep or a frequency-weighted draw.
 
+## Tail draw (2026-11-14; built, not yet run)
+
+`RTX_VOCAB_PRUNE_TAIL_DRAW` chooses how the t tail ids are drawn (default `uniform`, as before):
+
+- `freq` (user's idea): less rare ids are drawn more often, with matching weights. Systematic sampling
+  proportional to size along the frequency ranking: t equally spaced points with one random start on
+  the cumulative sizes; an id is drawn with probability p = t * size / total and weighs 1 / p, so the
+  normalizer stays unbiased. Size = half the id's share of the tail's target counts so far + half
+  uniform, so no weight exceeds ~2x the uniform one. Less rare ids get weights of a few x instead of ~21x.
+  (Priority sampling was tried first in a CPU test and dropped: its total is no less noisy than uniform.)
+- `sweep`: the next t tail ids along a fixed stride permutation (stride 20011, the record's way for its
+  negatives). Every tail id is visited once per pass, no RNG; uniform weight rest / t.
+
+Both run on the device with no sync and cost about what the uniform draw costs. The log line
+`VOCAB_PRUNE run ... short_tails=N` counts sets whose tail came out short (an id hit twice); expect 0.
+
+```bash
+python -u tools/run_pair.py --seeds 999 --label vocab-prune-m0.20-t2048-xe-from681-freq \
+  --candidate-env RTX_VOCAB_PRUNE_MASS=0.20 --candidate-env RTX_VOCAB_PRUNE_TAIL=2048 \
+  --candidate-env RTX_VOCAB_PRUNE_EXACT_END=1 --candidate-env RTX_VOCAB_PRUNE_FROM_STEP=681 \
+  --candidate-env RTX_VOCAB_PRUNE_TAIL_DRAW=freq
+```
+
+Then the same with `RTX_VOCAB_PRUNE_TAIL_DRAW=sweep` (label `...-sweep`). Compare both with the
+uniform draw: +0.0035 / -3.89%.
+
 Other proposals from the same brainstorm (none built): widths ramping 8,192 -> 10,240 -> 14,336 with a
 larger exact part late; a stride sweep through the tail instead of random draws; tail weight
 (rest/t)^0.5 (smaller spikes for Adam on the tied lm_head); exact ids chosen by the model's predicted

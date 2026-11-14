@@ -313,6 +313,96 @@ class StratifiedModeTests(unittest.TestCase):
                 sys.modules[name] = original
 
 
+class TailDrawTests(unittest.TestCase):
+    V, WIDTH, TAIL = 3000, 500, 128
+
+    def candidates(self, draw):
+        r = RankedCandidates(self.V, 512, "cpu", self.TAIL, draw=draw)
+        rng = np.random.default_rng(5)
+        counts = (2e5 / (1 + rng.permutation(self.V)) ** 1.1).astype(np.int32)  # Zipf-like target counts
+        r.counts.copy_(torch.from_numpy(counts))
+        return r, torch.from_numpy(counts)
+
+    def estimates(self, draw, z, targets, draws=600):
+        r, _ = self.candidates(draw)
+        out = []
+        for _ in range(draws):
+            cand, logw = r.build(0, targets, self.WIDTH)
+            self.assertEqual(int(r.tail_mask.sum()), self.TAIL)
+            self.assertFalse((r.exact & r.tail_mask).any())
+            self.assertTrue(torch.isfinite(logw).all() and (logw >= 0).all())
+            self.assertTrue((logw[~r.tail_mask[cand]] == 0).all())
+            out.append(torch.exp(z[cand] + logw).sum())
+        return torch.stack(out)
+
+    def test_freq_draw_is_unbiased_and_less_noisy_when_logits_follow_frequency(self):
+        _, counts = self.candidates("uniform")
+        torch.manual_seed(1)
+        z = torch.log(counts.float() + 1) + 0.3 * torch.randn(self.V)
+        targets = torch.randint(0, self.V, (150,))
+        full = torch.exp(z).sum()
+        freq, uniform = self.estimates("freq", z, targets), self.estimates("uniform", z, targets)
+        self.assertLess(abs(float(freq.mean() / full) - 1), 0.02)
+        self.assertLess(abs(float(uniform.mean() / full) - 1), 0.02)
+        self.assertLess(float(freq.std()), 0.7 * float(uniform.std()))
+
+    def test_freq_draw_is_unbiased_when_logits_ignore_frequency(self):
+        torch.manual_seed(2)
+        z = torch.randn(self.V) * 1.5
+        targets = torch.randint(0, self.V, (150,))
+        estimates = self.estimates("freq", z, targets, draws=1500)
+        self.assertLess(abs(float(estimates.mean() / torch.exp(z).sum()) - 1), 0.03)
+
+    def test_sweep_visits_every_tail_id_once_per_pass(self):
+        r, _ = self.candidates("sweep")
+        targets = torch.randint(0, self.V, (150,))
+        rest = self.V - (self.WIDTH - self.TAIL)
+        passes = rest // self.TAIL  # whole builds before the sweep wraps
+        visits = torch.zeros(self.V, dtype=torch.int64)
+        for build in range(passes + 1):
+            cand, logw = r.build(0, targets, self.WIDTH)
+            self.assertEqual(int(r.tail_mask.sum()), self.TAIL)
+            self.assertTrue(torch.allclose(logw[r.tail_mask[cand]], torch.tensor(float(np.log(rest / self.TAIL)))))
+            visits += r.tail_mask
+            if build == passes - 1:
+                self.assertEqual(int(visits.max()), 1)  # no id twice within a pass
+        self.assertTrue((visits[~r.exact] >= 1).all())  # every tail id visited
+        self.assertEqual(int(visits[r.exact].sum()), 0)
+        r.reset()
+        self.assertEqual(int(r.sweep_offset), 0)
+
+    def test_wiring_and_config(self):
+        sampled = import_portable_sampled()
+        s = sampled.PortableSampledSoftmax(schedule(), VOCAB, 16, 512, "cpu", mass=0.20, tail=2048,
+                                           exact_end=True, first=681, draw="freq")
+        self.assertIn("tail draw=freq", s.describe())
+        lm = torch.empty_strided((16, VOCAB), (1, 16), dtype=torch.float8_e4m3fn)
+        lm.T.copy_(torch.randn(VOCAB, 16).clamp(-4, 4).to(torch.float8_e4m3fn))
+        targets = torch.randint(0, 50_257, (512,))
+        inputs = s.prepare(700, targets, lm)
+        self.assertEqual(int(s.ranked.tail_mask.sum()), 2048)
+        self.assertTrue(torch.equal(s.candidates[:8192][inputs.target_pos[:512]], targets))
+        name = "track_1_short.portable.config"
+        original = importlib.import_module(name)
+
+        def fresh():
+            sys.modules.pop(name, None)
+            return importlib.import_module(name)
+
+        base = dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_TAIL="2048")
+        try:
+            self.assertEqual(original.VOCAB_PRUNE_TAIL_DRAW, "uniform")
+            with patch.dict(os.environ, dict(base, RTX_VOCAB_PRUNE_TAIL_DRAW="sweep")):
+                self.assertEqual(fresh().VOCAB_PRUNE_TAIL_DRAW, "sweep")
+            for env in (dict(base, RTX_VOCAB_PRUNE_TAIL_DRAW="zipf"),
+                        dict(RTX_VOCAB_PRUNE_MASS="0.20", RTX_VOCAB_PRUNE_TAIL_DRAW="freq")):
+                with self.subTest(env=env), patch.dict(os.environ, env), self.assertRaises(AssertionError):
+                    fresh()
+        finally:
+            sys.modules[name] = original
+            sys.modules["track_1_short.portable"].config = original
+
+
 class ExactEndTests(unittest.TestCase):
     def test_exact_end_keeps_the_record_full_softmax_steps(self):
         self.assertEqual(ranked_counts([10240, 24576, 0], 0.20, VOCAB, 1024, exact_end=True), [7168, 7168, 0])

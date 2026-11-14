@@ -20,7 +20,7 @@ if [[ "${RTX_WANDB_UPLOAD:-1}" == "1" && "${RTX_PREFLIGHT:-0}" != "1" ]]; then
     upload_args=("$console_log" --entity i-learn --project speedrun)
     [[ -z "${TRAIN_SEED:-}" ]] || upload_args+=(--seed "$TRAIN_SEED")
     [[ -z "$training_commit" ]] || upload_args+=(--training-commit "$training_commit")
-    upload_args+=(--name "vocab-prune-m${RTX_VOCAB_PRUNE_MASS:-0}${RTX_VOCAB_PRUNE_TAIL:+-t$RTX_VOCAB_PRUNE_TAIL}${RTX_VOCAB_PRUNE_EXACT_END:+-xe$RTX_VOCAB_PRUNE_EXACT_END}${RTX_VOCAB_PRUNE_FROM_STEP:+-from$RTX_VOCAB_PRUNE_FROM_STEP}${RTX_VOCAB_PRUNE_UNTIL_STEP:+-until$RTX_VOCAB_PRUNE_UNTIL_STEP}${RTX_VOCAB_PRUNE_SWITCH:+-sw}${RTX_VOCAB_PRUNE_TAIL_POWER:+-p$RTX_VOCAB_PRUNE_TAIL_POWER}-1gpu-seed-${TRAIN_SEED:-unseeded}")
+    upload_args+=(--name "vocab-prune-m${RTX_VOCAB_PRUNE_MASS:-0}${RTX_VOCAB_PRUNE_TAIL:+-t$RTX_VOCAB_PRUNE_TAIL}${RTX_VOCAB_PRUNE_EXACT_END:+-xe$RTX_VOCAB_PRUNE_EXACT_END}${RTX_VOCAB_PRUNE_FROM_STEP:+-from$RTX_VOCAB_PRUNE_FROM_STEP}${RTX_VOCAB_PRUNE_UNTIL_STEP:+-until$RTX_VOCAB_PRUNE_UNTIL_STEP}${RTX_VOCAB_PRUNE_SWITCH:+-sw}${RTX_VOCAB_PRUNE_TAIL_POWER:+-p$RTX_VOCAB_PRUNE_TAIL_POWER}${RTX_VOCAB_PRUNE_TAIL_DRAW:+-$RTX_VOCAB_PRUNE_TAIL_DRAW}-1gpu-seed-${TRAIN_SEED:-unseeded}")
     echo "Training finished. Uploading recorded metrics to i-learn/speedrun."
     if ! "$upload_python" tools/upload_wandb.py "${upload_args[@]}"; then
         echo "WARNING: training succeeded but W&B upload failed. Local results are safe: $console_log" >&2

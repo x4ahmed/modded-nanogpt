@@ -55,8 +55,8 @@
   PER-STAGE MASS (RTX_VOCAB_PRUNE_SWITCH=step:mass:tail, 146e59f): from 681 + switch 965:0.10:2048 (width 13,184)
   = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever.
   TAIL POWER (RTX_VOCAB_PRUNE_TAIL_POWER=b: tail weight (rest/t)^b, 5607f34): b=0.5 from 681 = +0.0065 / -3.51%,
-  worse than b=1 (+0.0035 = BEST two-block): keep the unbiased weight. Parked (unbiased only): stride sweep,
-  frequency-weighted tail draw; user's pruned ending with an estimated normalizer.
+  worse than b=1 (+0.0035 = BEST two-block): keep the unbiased weight. TAIL DRAW (RTX_VOCAB_PRUNE_TAIL_DRAW=
+  freq|sweep, built 2026-11-14, not yet run; user's order: freq, then sweep; docs "Tail draw"). Parked: user's pruned ending with an estimated normalizer.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a

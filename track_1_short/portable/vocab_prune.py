@@ -47,9 +47,14 @@ Cost kept on the clock: the per-microbatch mark; one device-to-host copy of the 
 transpose per step (the fp8 cache changes only between steps); the sampled path's lm_head-gradient
 densify.
 """
+import math
+
 import numpy as np
 import torch
 
+# How the stratified tail is drawn (RTX_VOCAB_PRUNE_TAIL_DRAW): uniform random; "freq" = less rare ids
+# more often, with matching weights (unbiased); "sweep" = a fixed stride sweep through the tail.
+TAIL_DRAWS = ("uniform", "freq", "sweep")
 PRUNED_WIDTH = 50_048
 assert PRUNED_WIDTH % 128 == 0
 
@@ -140,10 +145,18 @@ class RankedCandidates:
 
     TAIL_SEED = 20011  # the tail's own generator: the global RNG streams are never touched
 
-    def __init__(self, vocab_size: int, max_rows: int, device, tail: int = 0, power: float = 1.0):
+    SWEEP_STRIDE = 20011  # the record's negative stride; coprime with the vocabulary
+
+    def __init__(self, vocab_size: int, max_rows: int, device, tail: int = 0, power: float = 1.0,
+                 draw: str = "uniform"):
+        assert draw in TAIL_DRAWS, f"tail draw {draw!r}: one of {TAIL_DRAWS}"
+        assert math.gcd(self.SWEEP_STRIDE, vocab_size) == 1
         self.vocab_size = vocab_size
         self.tail = tail
         self.power = power  # tail weight = (rest / tail) ** power; 1 = unbiased, < 1 = smaller spikes, biased
+        self.draw = draw
+        self.positions = torch.arange(vocab_size, device=device)
+        self.sweep = (self.SWEEP_STRIDE * self.positions) % vocab_size
         self.counts = torch.zeros(vocab_size, dtype=torch.int32, device=device)
         self.is_target = torch.zeros(vocab_size, dtype=torch.bool, device=device)
         self.extra = torch.zeros(vocab_size, dtype=torch.bool, device=device)
@@ -160,6 +173,8 @@ class RankedCandidates:
         self.order = torch.arange(self.vocab_size, device=self.counts.device)
         self.ranked_step: int | None = None
         self.generator.manual_seed(self.TAIL_SEED)
+        self.sweep_offset = torch.zeros((), dtype=torch.int64, device=self.counts.device)
+        self.short_tails = torch.zeros((), dtype=torch.int64, device=self.counts.device)
 
     def observe(self, targets: torch.Tensor):
         """Stage gate: count a microbatch that runs the record's own set, so the ranking stays the
@@ -189,21 +204,51 @@ class RankedCandidates:
         torch.logical_or(self.is_target, self.extra, out=self.exact)
         if not tail:
             return torch.argsort((~self.exact).to(torch.int8), stable=True)[:width], None
-        # Uniform draw without replacement from the ids outside the exact part: the `tail` smallest keys.
-        keys = torch.rand(self.vocab_size, generator=self.generator, device=self.counts.device)
-        keys.masked_fill_(self.exact, 2.0)
+        rest = self.vocab_size - self.exact.sum()
+        log_w = torch.log(rest.to(torch.float32) / tail)  # the uniform weight: scalar
+        if self.draw == "freq":
+            # Systematic sampling with probability proportional to size, along the frequency ranking:
+            # `tail` equally spaced points (one random start) on the cumulative sizes; an id is drawn with
+            # probability p = tail * size / total and weighs 1 / p (unbiased; exact when the summands are
+            # proportional to the sizes). Size = half the id's share of the tail's target counts so far +
+            # half uniform: less rare ids are drawn more often at smaller weights, and no weight exceeds
+            # ~2x the uniform one. Sizes are capped at total / tail so no id is hit twice.
+            tail_counts = self.counts.to(torch.float64).masked_fill(self.exact, 0.0)
+            size = (tail_counts / tail_counts.sum().clamp(min=1.0) + 1.0 / rest).masked_fill_(self.exact, 0.0)
+            for _ in range(3):
+                size = torch.clamp(size, max=size.sum() / tail)
+            cumulative = torch.cumsum(size[self.order], 0)
+            start = torch.rand((), generator=self.generator, device=self.counts.device, dtype=torch.float64)
+            points = (start + self.positions[:tail]) * (cumulative[-1] * (1 - 1e-12) / tail)
+            chosen = self.order[torch.searchsorted(cumulative, points, right=True).clamp_(max=self.vocab_size - 1)]
+            log_w = torch.log(torch.clamp(size.sum() / (tail * size), min=1.0)).to(torch.float32)  # (V,)
+        elif self.draw == "sweep":
+            # The next `tail` ids outside the exact part along a fixed stride permutation (the record's
+            # way for its negatives): every tail id is visited once per pass, no RNG. Uniform weight.
+            order = self.sweep[(self.positions + self.sweep_offset) % self.vocab_size]
+            free = ~self.exact[order]
+            first_free = torch.where(free, self.positions, self.positions + self.vocab_size)
+            chosen = order[torch.topk(first_free, tail, largest=False).indices]
+            self.sweep_offset = (self.sweep_offset + (torch.cumsum(free, 0) < tail).sum() + 1) % self.vocab_size
+        else:
+            # Uniform draw without replacement from the ids outside the exact part: the `tail` smallest keys.
+            keys = torch.rand(self.vocab_size, generator=self.generator, device=self.counts.device)
+            keys.masked_fill_(self.exact, 2.0)
+            chosen = torch.topk(keys, tail, largest=False).indices
         self.tail_mask.zero_()
-        self.tail_mask.index_fill_(0, torch.topk(keys, tail, largest=False).indices, True)
+        self.tail_mask.index_fill_(0, chosen, True)
+        self.tail_mask.logical_and_(~self.exact)
+        self.short_tails += self.tail_mask.sum() < tail  # an id drawn twice or an exact id: counted, never silent
         selected = self.exact | self.tail_mask
         candidates = torch.argsort((~selected).to(torch.int8), stable=True)[:width]
-        rest = self.vocab_size - self.exact.sum()
-        log_w = torch.log(rest.to(torch.float32) / tail) * self.power
-        col_logw = torch.where(self.tail_mask[candidates], log_w, torch.zeros((), device=log_w.device))
+        column_w = (log_w[candidates] if log_w.ndim else log_w) * self.power
+        col_logw = torch.where(self.tail_mask[candidates], column_w, torch.zeros((), device=log_w.device))
         return candidates, col_logw
 
     def summary(self) -> str:
         """Reads the device counters (a sync): call off the clock."""
-        return f"overflow_microbatches={int(self.overflow.item())} distinct_seen={int((self.counts > 0).sum().item())}"
+        return (f"overflow_microbatches={int(self.overflow.item())} short_tails={int(self.short_tails.item())} "
+                f"distinct_seen={int((self.counts > 0).sum().item())}")
 
 
 def pruned_counts(counts: list[int]) -> list[int]:
