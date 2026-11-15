@@ -550,6 +550,20 @@ stage 0 4,550 / 4,904 / 5,041; stage 1 7,211 / 7,785 / 7,996; stage 2 (steps 681
 instead of 2.1%, and its loss is untested. The closest existing setting is m = 0.10, t = 2,048 from 965
 (11,136 exact + 2,048 = 13,184 wide), which can be measured on the 5090.
 
+### 8xH100 candidate (2026-11-15; built, never run on a GPU)
+
+Branch `experiment/vocab-prune-h100` (b224e93), from the upstream record commit 4ea6b93 (record #92,
+39.9 s; upstream master is still there; the local `master` branch is stale). It is the 965-1106 setting
+as a chunked loss: the model runs each rank's 49,152-row microbatch once, and only the loss is split
+into 3 chunks of 16,384 rows, each with its own 8,192-wide set (6,144 exact + 2,048 weighted tail).
+That is the port's 24 microbatches per step (8 ranks x 3 chunks), so the loss is the one measured
+above, and the full column cut is kept. Sets are built on the host (the record's prep thread), each
+rank ranking by its own targets. 13 CPU tests pass (builder, schedule, upload/gather bookkeeping, the
+chunked loss's plumbing against a direct reference). The captured step graphs, the compiled model and
+the CUDA kernels cannot run locally: the first 8xH100 run is the first execution. Run guide, pool
+script, statistics and the rules check: `records/track_1_short/2026-11-15_StratifiedSoftmaxTail/` on
+that branch. Record pool for scale: 39.914 +/- 0.120 s, val 3.27731 +/- 0.00099 (n = 18).
+
 Controls 1 and 2, three paired seeds each (pair time deltas vary ~1.4 s SD between seeds):
 
 ```bash
