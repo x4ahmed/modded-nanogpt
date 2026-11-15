@@ -552,7 +552,7 @@ instead of 2.1%, and its loss is untested. The closest existing setting is m = 0
 
 ### 8xH100 candidate (2026-11-15; built, never run on a GPU)
 
-Branch `experiment/vocab-prune-h100` (b224e93), from the upstream record commit 4ea6b93 (record #92,
+Branch `experiment/vocab-prune-h100` (79c33cb), from the upstream record commit 4ea6b93 (record #92,
 39.9 s; upstream master is still there; the local `master` branch is stale). It is the 965-1106 setting
 as a chunked loss: the model runs each rank's 49,152-row microbatch once, and only the loss is split
 into 3 chunks of 16,384 rows, each with its own 8,192-wide set (6,144 exact + 2,048 weighted tail).
