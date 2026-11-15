@@ -23,7 +23,7 @@
   vocabulary pruning (portable/vocab_prune.py, knob RTX_VOCAB_PRUNE_MASS); tools/token_census.py.
 - Entry: run_rtx.sh -> train_gpt_rtx.py; shared architecture: track_1_short/.
 - Cluster checkout: ~/speed-run/modded-nanogpt; training venv: ~/venvs/nanogpt.
-- Training commands require one allocated RTX 5090; no concurrent training on that GPU. User (2026-11-14): run all experiments in this mode: a tmux session on the allocated GPU node, script started with bash ... | tee <log> (survived a 10+ h batch).
+- Training commands require one allocated RTX 5090; no concurrent training on that GPU. User (2026-11-14): run all experiments in this mode: a tmux session on the allocated GPU node, script started with bash ... | tee <log>. Detach only; closing the terminal that holds the allocation kills the job (16309). Unattended runs: sbatch.
 - Local CPU tests: C:/Users/Ahmed/anaconda3/python.exe (torch 2.8, CPU); plain `python` is not on PATH.
 
 ## This idea: vocabulary pruning (docs/vocab-prune.md; Notion 2026-11-05: drop unneeded tokens)
@@ -56,7 +56,7 @@
   = +0.0033 / -2.99%: no better than 8,192 everywhere, 7.6 s lost; exact-part width is not the lever.
   TAIL POWER (RTX_VOCAB_PRUNE_TAIL_POWER=b: tail weight (rest/t)^b, 5607f34): b=0.5 from 681 = +0.0065 / -3.51%,
   worse than b=1 (+0.0035 = BEST two-block): keep the unbiased weight. TAIL DRAW (RTX_VOCAB_PRUNE_TAIL_DRAW=
-  freq|sweep, e14858e; docs "Tail draw"): from 681 freq +0.0040 / -3.71%, sweep +0.0034 / -3.95% = uniform (+0.0035) within noise; the draw is not the lever. FIVE PAIRED SEEDS 999-1003 (2026-11-14, 18adb8d; mean +/- SD of pair deltas): 681-1106 sweep +0.00396 +/- 0.00038 / -3.74 +/- 0.24% (-32.3 s; every seed over the bar); 965-1106 +0.00100 +/- 0.00051 / -2.12 +/- 0.16% (-18.3 s; every seed inside the bar, max +0.0015, but worse on all five). CONTROLS before any H100 test of 965-1106 (built, NOT RUN; docs "Controls"): fewer steps (run_pair now takes --candidate-env NUM_SCHEDULED_ITERATIONS=1096 = 1168 updates, gate FROM_STEP=1194 so nothing is pruned) and GPU-built record-width sets (m=0.01, no tail, from 965; its saving = port-only builder share); plus a CPU count, tools/token_census.py --ranks 8 (distinct targets per 49,152-token rank slice in stage 2 must stay < 6,144 for width 8,192 to fit on 8 GPUs). Parked: user's pruned ending with an estimated normalizer.
+  freq|sweep, e14858e; docs "Tail draw"): from 681 freq +0.0040 / -3.71%, sweep +0.0034 / -3.95% = uniform (+0.0035) within noise; the draw is not the lever. FIVE PAIRED SEEDS 999-1003 (2026-11-14, 18adb8d; mean +/- SD of pair deltas): 681-1106 sweep +0.00396 +/- 0.00038 / -3.74 +/- 0.24% (-32.3 s; every seed over the bar); 965-1106 +0.00100 +/- 0.00051 / -2.12 +/- 0.16% (-18.3 s; every seed inside the bar, max +0.0015, but worse on all five). CONTROLS before any H100 test of 965-1106 (docs "Controls"): (1) fewer steps (run_pair --candidate-env NUM_SCHEDULED_ITERATIONS=1096 = 1168 updates, gate FROM_STEP=1194 so nothing is pruned) DONE 2026-11-15, seeds 999/1000: +0.0051 / -2.20%, +0.0035 / -1.49% (mean +0.0043 / -1.85%) = 4-5x more loss per 1% time than pruning 965-1106, which therefore beats cutting steps; (2) GPU-built record-width sets (m=0.01, no tail, from 965; its saving = port-only builder share) NOT RUN (job 16309 died when the terminal holding the allocation closed: keep it open or use sbatch); plus NOT RUN a CPU count, tools/token_census.py --ranks 8 (distinct targets per 49,152-token rank slice in stage 2 must stay < 6,144 for width 8,192 to fit on 8 GPUs). Parked: user's pruned ending with an estimated normalizer.
 
 ## Commands
 - Census: python -u tools/token_census.py (training venv; DATA_PATH if shards are elsewhere). Prints a
@@ -87,7 +87,7 @@
 - Phase 2 (paired, seed 999; experiment/attnres-last-init): zero-init block AttnRes +0.0369 / +10.5%;
   last-state init +0.0330 / +11.2%. Init explains at most ~0.004 of the regression.
 - Phase 2 ideas (Notion 2026-11-05): AttnRes init (done), vocab pruning (this branch), mHC (not started).
-  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass, 18 tail power, 19-20 tail draws, 21-22 five seeds (sweep 681-1106, 965-1106); notes = Setup / Result / Takeaway.
+  Notion "Ideas vs Results" rows: 1-2 AttnRes, 3-6 ranked, 7-9 stratified, 10-11 exact end, 12-13 tail 4096, 14-16 stage gate, 17 per-stage mass, 18 tail power, 19-20 tail draws, 21-22 five seeds (sweep 681-1106, 965-1106), 23 fewer-steps control; notes = Setup / Result / Takeaway.
 - Canonical-mask warnings and rebuild time remain part of measured training time.
 
 ## Logging

@@ -515,6 +515,19 @@ Two things could erase a 2.1% gain there; both are measured on the 5090 first.
    distinct targets per rank slice by stage. Stage 2's maximum must stay under 6,144 for the same width
    to fit on 8 GPUs; otherwise the set must be wider there and the saving shrinks.
 
+Control 1 result (2026-11-15, commit da5813b; seed 1001 and control 2 were lost when the allocation
+ended, job 16309 killed after the terminal closed):
+
+| Seed | Baseline loss / s | 1,168 updates: loss / s | Loss delta | Time delta |
+| --- | --- | --- | --- | --- |
+| 999 | 3.294912 / 858.441 | 3.300036 / 839.535 | +0.005124 | -18.9 s (-2.20%) |
+| 1000 | 3.295813 / 857.257 | 3.299295 / 844.462 | +0.003482 | -12.8 s (-1.49%) |
+| Mean | 3.295363 / 857.8 | 3.299666 / 842.0 | +0.0043 | -15.9 s (-1.85%) |
+
+Cutting 26 steps costs about +0.0043 for 1.85% time; pruning 965-1106 costs +0.0010 for 2.12%. Per 1% of
+time: ~0.0023 loss for fewer steps against ~0.0005 for pruning, about 4-5x cheaper. Both seeds are far
+above every 965-1106 seed (max +0.0015), so two seeds are enough to say pruning beats cutting steps.
+
 Controls 1 and 2, three paired seeds each (pair time deltas vary ~1.4 s SD between seeds):
 
 ```bash
