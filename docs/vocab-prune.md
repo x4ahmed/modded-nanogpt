@@ -528,6 +528,28 @@ Cutting 26 steps costs about +0.0043 for 1.85% time; pruning 965-1106 costs +0.0
 time: ~0.0023 loss for fewer steps against ~0.0005 for pruning, about 4-5x cheaper. Both seeds are far
 above every 965-1106 seed (max +0.0015), so two seeds are enough to say pruning beats cutting steps.
 
+Control 2 result (2026-11-15, commit 329d920, seeds 999-1001; loss is not the point here):
+
+| Seed | Baseline s | GPU-built 24,576 sets on 965-1106: s | Time delta | Loss delta |
+| --- | --- | --- | --- | --- |
+| 999 | 814.554 | 811.693 | -2.9 s (-0.35%) | +0.0087 |
+| 1000 | 813.633 | 813.380 | -0.3 s (-0.03%) | +0.0077 |
+| 1001 | 826.051 | 829.497 | +3.4 s (+0.42%) | +0.0090 |
+| Mean | 818.1 | 818.2 | +0.1 s (+0.01%), SD 3.2 s | +0.0085 |
+
+Building the sets on the GPU saves nothing measurable on these steps (0.1 +/- 1.8 s standard error).
+The 18.3 s of 965-1106 comes from the narrower set, not from the port's host builder. (Ranked fill
+without a tail on 142 steps alone costs +0.0085: the tail is needed even on a short block.)
+
+Control 3 result (census --ranks 8, 2026-11-15): distinct targets per rank slice, mean / p99 / max:
+stage 0 4,550 / 4,904 / 5,041; stage 1 7,211 / 7,785 / 7,996; stage 2 (steps 681-1106) 9,339 / 10,018 /
+10,397; stage 3 8,312 / 8,976 / 9,096; stage 4 4,377 / 4,839 / 4,848. On 8 GPUs a slice of steps
+965-1106 holds up to 10,397 distinct targets: more than the 6,144 exact slots and more than the whole
+8,192-wide set. The tested setting does not fit there. The smallest set that does is ~10,496 exact +
+2,048 tail = 12,544 (the record uses 24,576), so about 73% of the port's column cut: by columns, ~1.5%
+instead of 2.1%, and its loss is untested. The closest existing setting is m = 0.10, t = 2,048 from 965
+(11,136 exact + 2,048 = 13,184 wide), which can be measured on the 5090.
+
 Controls 1 and 2, three paired seeds each (pair time deltas vary ~1.4 s SD between seeds):
 
 ```bash
