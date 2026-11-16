@@ -4,6 +4,8 @@
 
 On steps 965-1106, where record #92's sampled softmax is widest (24,576 ids), train on 8,192 columns instead. Everything else is the record's.
 
+The idea: late in training the record scores every token against 24,576 candidate ids, and most of that work goes to rare ids that barely matter for any single token. Simply dropping them fails, because ids that are never shown as wrong answers drift upward and steal probability at validation. So the common ids are kept exact, and the rare ones are represented by a small random sample, each sampled id weighted to count for all the rare ids it stands in for. Every id is still pushed down by the right amount on average, at a third of the cost.
+
 ![Stratified sampled softmax: the schedule, how a pruned step builds its sets, and the measured step times](https://raw.githubusercontent.com/x4ahmed/modded-nanogpt/c9384a80be5d900037bcbd6bcbdca347fadce942/records/track_1_short/2026-11-15_StratifiedSoftmaxTail/stratified_softmax.png)
 
 ## Result
