@@ -623,3 +623,24 @@ kernel self-check passed and the first run compiled, captured its graphs and tra
 One pair only: -0.43 s (-1.1%) overall, -0.505 s on steps 950-1100 (about 3.7 ms per pruned step),
 no visible loss cost (run-to-run std is about 0.001). Smaller than the 0.8 s the port's -2.1% suggested.
 Not a result until the pool is in.
+
+### 8xH100 pool: 10 candidate + 5 record runs (2026-11-16)
+
+Same node and session as above, legs interleaved (C B C C B C C B C C B C C after the first pair),
+every run counted, the smoke run excluded beforehand.
+
+| Pool | Runs | Val loss | Train time |
+| --- | --- | --- | --- |
+| Candidate (7b6d63c) | 10 | 3.27615 +/- 0.00100 | 39.704 +/- 0.049 s |
+| Record 4ea6b93, same node | 5 | 3.27520 +/- 0.00052 | 40.231 +/- 0.020 s |
+
+- Time: 0.526 s faster (1.31%), one-sided Welch p = 2.1e-13. Every candidate run (39.659-39.809 s) is
+  faster than every baseline run (40.200-40.248 s).
+- Loss: +0.95 millinats (standard error about 0.39), the port's +1.0 again. Rule 2 (mean <= 3.28):
+  t = -12.2, one-sided p = 3.3e-7, pass.
+- Price: 554 ms per millinat; the record's write-up prices a millinat at 120-250 ms, so this beats
+  spending the same loss on fewer steps.
+- The node's baseline (40.231 s) is slower than the record's published 39.914 s; the candidate is
+  below both.
+- The saving is 1.31%, not the port's 2.12%: on 8 GPUs the lm_head loss is a smaller share of a step.
+- "Stratified chunks with a grown exact part: 0" in the logs checked: the 6,144 + 2,048 split held.
