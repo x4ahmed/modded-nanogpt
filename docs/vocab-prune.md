@@ -662,3 +662,11 @@ Same node and session; 8 more candidate and 4 more record runs, interleaved, eve
   3.2788), which is why both means moved up and the baseline's std grew; the difference stayed small.
 - All 27 logs are in the record folder on the branch and reproduce these numbers with
   `pool_statistics.py`. The pool is the size the current record was certified with (18 + 9).
+
+### Record PR prepared (2026-11-16)
+
+Branch `experiment/vocab-prune-h100` at c9384a8: the record folder's README is now the write-up (result,
+diagram, rules, disclosures), the candidate logs moved to `this_pr/` (upstream's layout), and
+`figure.py` draws `stratified_softmax.png` from the schedule constants and the 27 logs. The PR title
+and description are in `docs/h100-pr-body.md`. Not opened: upstream master is still 4ea6b93, so the
+branch applies cleanly; opening the PR against KellerJordan/modded-nanogpt is the user's step.
