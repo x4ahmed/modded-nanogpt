@@ -677,9 +677,18 @@ Cold against warm legs (same day): the pool did not wipe compile caches between 
 were never fully cold. On cold legs only the win is 0.45 s instead of 0.53 s. Disclosed in the record
 README and the PR text. A fully cold pool (caches wiped per leg, both versions) was NOT run.
 
-Upstream PR queue (looked up 2026-11-16 through a page summary, states NOT verified): master is still
-record #92, but many Track 1 PRs opened after it claim larger gains on #92 or on each other, e.g. #379
-(-4.57 s), #382 (-3.63 s), #391 (34.856 s), #393 (31.29 s), #397 (30.67 s); #372 "adaptive softmax
-(-2.3 s)" is closed and is the closest idea to ours. Upstream encourages building on open PRs. Not yet
-checked: why #372 was closed, and whether our change stacks on the leading open PRs. Recent titles
-read "Track 1: <what> (<gain>)"; the PR title was changed to match.
+Upstream PR queue (GitHub API, 2026-11-16; this replaces an earlier unverified note). Nothing has been
+merged since record #92 (#360, merged 2026-09-28, plus the maintainer's refactor #373/#374). About 20
+Track 1 PRs are open on it or on each other: #371 sampled lm_head gradients + truncated attention
+backward (-0.76 s), #375 (-0.42 s), #379 CPLM (-4.57 s), #382 (-3.63 s), #391 = #379 + #375 (34.856 s),
+#393 (31.29 s), #397 (30.67 s), #380 and #367 (far larger claims). #372 adaptive softmax was closed by
+its author: it was built on the 65 s record and the record's sampled softmax beat it (the user's
+correction). #371 is the nearest idea to ours but samples token rows for the weight gradient, where we
+sample loss columns; not tested together. Ours is on master alone.
+
+What merged small Track 1 PRs looked like (#337, #342, #350): a short description with one result
+table (N, time, loss, p), logs in the record folder with a statistics.md per pool, only trainer files
+changed besides logs. The maintainer retimes on main and merges at his own number; in #337 he moved a
+precomputed table inside the timed window. Ours: same layout, statistics.md files added, title in the
+"Track 1: <what> (<gain>, <% same hardware>)" style. Extra compared with them: tests/, the node
+scripts, figure.py and the diagram.

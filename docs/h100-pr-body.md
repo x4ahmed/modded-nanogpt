@@ -1,4 +1,4 @@
-<!-- PR title: Track 1: stratified sampled softmax on the widest steps (-0.53 s on #92, 39.70 s) -->
+<!-- PR title: Track 1: Stratified sampled softmax on the widest steps (-0.53s, -1.32% same hardware, n=18) -->
 
 One change on top of record #92 (ANVIL2, #360): steps 965-1106, where the record's sampled softmax is widest (24,576 ids), train on 8,192 columns instead.
 
@@ -43,7 +43,13 @@ One new 151-line module (`track_1_short/stratified_softmax.py`) and about 230 ch
 - Compile caches were not wiped between legs (record #92's pool wiped them). The timed section starts after compilation, warmup and graph capture either way, but this tree's three cold legs were slower (39.783 s on average) than its 15 warm ones (39.686 s). Counting only the cold legs against the whole baseline pool, the win is 0.45 s instead of 0.53 s.
 - The first execution of this tree on the node was declared a functional check beforehand and is not in the pool (3.2757, 39.748 s).
 - The tail draws use their own numpy generator seeded per GPU with a fixed constant; no global RNG stream is touched and the runs are otherwise unseeded.
-- The frequency ranking is counted during the run, from step 0; nothing is precomputed from the data.
+- The frequency ranking is counted during the run, inside the timed section, from step 0; nothing is precomputed from the data.
 - Warmup and graph capture have the same shape as record #92 (25 untimed warmup steps, 12 captured step graphs); peak memory is unchanged.
+
+## Related PRs
+
+- #371 (open) samples token rows for the lm_head's weight gradient on steps 320-1106. This PR samples columns of the loss on steps 965-1106. The two touch different axes of the same GEMMs; they have not been tested together.
+- #372 (closed by its author in favour of the record's sampled softmax) used an adaptive softmax with frequency clusters counted inside the timed run. The frequency ranking here is also counted inside the timed run.
+- This PR is based on master (record #92) alone and does not include any open PR.
 
 The full write-up, the 27 logs, the pool script and the statistics script are in `records/track_1_short/2026-11-15_StratifiedSoftmaxTail/`.
