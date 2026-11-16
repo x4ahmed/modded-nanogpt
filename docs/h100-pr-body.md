@@ -46,4 +46,4 @@ One new 151-line module and about 230 changed lines in 8 files. Write-up, 27 log
 
 ## Reference
 
-This work was done as part of a lab rotation with Prof. Paul Swoboda at Heinrich Heine University Düsseldorf (HHU).
+This work was done under the supervision of Prof. Paul Swoboda at Heinrich Heine University Düsseldorf (HHU).
