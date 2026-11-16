@@ -608,3 +608,18 @@ narrow width).
     the run's own targets. No training cost; measured exactly inside one run by computing the
     validation loss with and without the extra mask from the same forward. Expected gain is tiny:
     those ids already sit near the softcap floor.
+
+### First 8xH100 runs (2026-11-16, preliminary)
+
+Nebius 8x H100 NVLink VM, driver 580.173.02, the record's Docker image, branch at 7b6d63c. The GPU
+kernel self-check passed and the first run compiled, captured its graphs and trained cleanly.
+
+| Run | Val loss | Train time | Steps 950-1100 |
+| --- | --- | --- | --- |
+| Smoke, candidate (not in the pool) | 3.2757 | 39.748 s | 6.708 s |
+| Pool leg 1, candidate | 3.2745 | 39.809 s | 6.697 s |
+| Pool leg 2, record 4ea6b93 on the same node | 3.2759 | 40.235 s | 7.202 s |
+
+One pair only: -0.43 s (-1.1%) overall, -0.505 s on steps 950-1100 (about 3.7 ms per pruned step),
+no visible loss cost (run-to-run std is about 0.001). Smaller than the 0.8 s the port's -2.1% suggested.
+Not a result until the pool is in.
