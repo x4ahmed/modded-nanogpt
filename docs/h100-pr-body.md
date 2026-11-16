@@ -38,4 +38,6 @@ Even with the loss cost two standard errors higher, this is about 320 ms per mil
 
 One new 151-line module and about 230 changed lines in 8 files. Write-up, 27 logs and scripts: `records/track_1_short/2026-11-15_StratifiedSoftmaxTail/`.
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+## Reference
+
+This work was done as part of a lab rotation with Prof. Paul Swoboda at Heinrich Heine University Düsseldorf (HHU).
