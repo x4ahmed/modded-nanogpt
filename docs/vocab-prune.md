@@ -644,3 +644,21 @@ every run counted, the smoke run excluded beforehand.
   below both.
 - The saving is 1.31%, not the port's 2.12%: on 8 GPUs the lm_head loss is a smaller share of a step.
 - "Stratified chunks with a grown exact part: 0" in the logs checked: the 6,144 + 2,048 split held.
+
+### 8xH100 pool topped up to 18 + 9 runs (2026-11-16)
+
+Same node and session; 8 more candidate and 4 more record runs, interleaved, every run counted.
+
+| Pool | Runs | Val loss | Train time |
+| --- | --- | --- | --- |
+| Candidate | 18 | 3.27670 +/- 0.00114 | 39.702 +/- 0.042 s |
+| Record 4ea6b93, same node | 9 | 3.27608 +/- 0.00136 | 40.235 +/- 0.017 s |
+
+- Time: 0.533 s faster (1.32%), one-sided Welch p = 1.3e-25; candidate runs 39.659-39.809 s, record
+  runs 40.200-40.257 s, no overlap.
+- Loss: +0.62 millinats (standard error about 0.5), so the cost is between about zero and one
+  millinat. Rule 2: t = -12.3, one-sided p = 3.5e-10, pass.
+- The later runs of both pools read higher in loss than the first ones (two record runs at 3.2776 and
+  3.2788), which is why both means moved up and the baseline's std grew; the difference stayed small.
+- All 27 logs are in the record folder on the branch and reproduce these numbers with
+  `pool_statistics.py`. The pool is the size the current record was certified with (18 + 9).
