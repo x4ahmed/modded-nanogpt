@@ -670,3 +670,9 @@ diagram, rules, disclosures), the candidate logs moved to `this_pr/` (upstream's
 `figure.py` draws `stratified_softmax.png` from the schedule constants and the 27 logs. The PR title
 and description are in `docs/h100-pr-body.md`. Not opened: upstream master is still 4ea6b93, so the
 branch applies cleanly; opening the PR against KellerJordan/modded-nanogpt is the user's step.
+
+Cold against warm legs (same day): the pool did not wipe compile caches between legs, unlike record
+#92's. This tree's three first-in-container legs took 39.809 / 39.776 / 39.764 s (mean 39.783 s), its
+15 later legs 39.686 s; the baseline shows no gap (40.231 against 40.237 s), though its first legs
+were never fully cold. On cold legs only the win is 0.45 s instead of 0.53 s. Disclosed in the record
+README and the PR text. A fully cold pool (caches wiped per leg, both versions) was NOT run.

@@ -40,7 +40,7 @@ One new 151-line module (`track_1_short/stratified_softmax.py`) and about 230 ch
 
 ## Disclosures
 
-- Compile caches were not wiped between legs (record #92's pool wiped them); the timed section starts after compilation, warmup and graph capture either way.
+- Compile caches were not wiped between legs (record #92's pool wiped them). The timed section starts after compilation, warmup and graph capture either way, but this tree's three cold legs were slower (39.783 s on average) than its 15 warm ones (39.686 s). Counting only the cold legs against the whole baseline pool, the win is 0.45 s instead of 0.53 s.
 - The first execution of this tree on the node was declared a functional check beforehand and is not in the pool (3.2757, 39.748 s).
 - The tail draws use their own numpy generator seeded per GPU with a fixed constant; no global RNG stream is touched and the runs are otherwise unseeded.
 - The frequency ranking is counted during the run, from step 0; nothing is precomputed from the data.
