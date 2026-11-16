@@ -25,7 +25,13 @@ Each GPU's 49,152-row loss is split into 3 chunks of 16,384 rows (the model stil
 
 ## Loss buffer
 
-Even with the loss cost two standard errors higher, this is about 320 ms per millinat, above the 120-250 ms that #360 measures.
+A change that spends loss should buy more time per millinat than simply cutting steps. It does, even in the pessimistic case:
+
+| Way to trade loss for time | Loss given up | Time saved | Time saved per millinat |
+|---|---:|---:|---:|
+| Cutting steps (measured in #360) | | | 120-250 ms |
+| This PR, as measured | 0.62 millinats | 533 ms | 860 ms |
+| This PR, loss cost two standard errors higher | 1.7 millinats | 533 ms | 320 ms |
 
 ## Disclosures
 
