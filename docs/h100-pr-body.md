@@ -1,4 +1,4 @@
-<!-- PR title: New record attempt: stratified sampled softmax on the widest steps (39.70 s, 0.53 s faster than #92 on the same node) -->
+<!-- PR title: Track 1: stratified sampled softmax on the widest steps (-0.53 s on #92, 39.70 s) -->
 
 One change on top of record #92 (ANVIL2, #360): steps 965-1106, where the record's sampled softmax is widest (24,576 ids), train on 8,192 columns instead.
 
@@ -47,5 +47,3 @@ One new 151-line module (`track_1_short/stratified_softmax.py`) and about 230 ch
 - Warmup and graph capture have the same shape as record #92 (25 untimed warmup steps, 12 captured step graphs); peak memory is unchanged.
 
 The full write-up, the 27 logs, the pool script and the statistics script are in `records/track_1_short/2026-11-15_StratifiedSoftmaxTail/`.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)

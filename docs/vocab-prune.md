@@ -676,3 +676,10 @@ Cold against warm legs (same day): the pool did not wipe compile caches between 
 15 later legs 39.686 s; the baseline shows no gap (40.231 against 40.237 s), though its first legs
 were never fully cold. On cold legs only the win is 0.45 s instead of 0.53 s. Disclosed in the record
 README and the PR text. A fully cold pool (caches wiped per leg, both versions) was NOT run.
+
+Upstream PR queue (looked up 2026-11-16 through a page summary, states NOT verified): master is still
+record #92, but many Track 1 PRs opened after it claim larger gains on #92 or on each other, e.g. #379
+(-4.57 s), #382 (-3.63 s), #391 (34.856 s), #393 (31.29 s), #397 (30.67 s); #372 "adaptive softmax
+(-2.3 s)" is closed and is the closest idea to ours. Upstream encourages building on open PRs. Not yet
+checked: why #372 was closed, and whether our change stacks on the leading open PRs. Recent titles
+read "Track 1: <what> (<gain>)"; the PR title was changed to match.
