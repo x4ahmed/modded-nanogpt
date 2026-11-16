@@ -10,6 +10,8 @@ The idea: most of those 24,576 ids are rare, but simply dropping them fails, bec
 
 ## Result
 
+18 runs of this PR, interleaved with 9 runs of record #92 on the same 8xH100 node in the same session; every run is counted.
+
 | Run | N | Time (s) | Validation loss | p (mean ≤ 3.28) |
 |---|---:|---:|---:|---:|
 | #92, same node, interleaved | 9 | 40.235 ± 0.017 | 3.27608 ± 0.00136 | |
